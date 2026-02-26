@@ -1,0 +1,38 @@
+{
+  "name": "wikivault-unified",
+  "version": "3.0.0",
+  "description": "AI-powered wiki generation with Virtual Linker integration, smart matching, category organization, and structured logging.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "lint": "eslint src/**/*.ts --max-warnings 0",
+    "format": "prettier --write 'src/**/*.ts'",
+    "format:check": "prettier --check 'src/**/*.ts'",
+    "typecheck": "tsc --noEmit",
+    "validate": "npm run format:check && npm run lint && npm run typecheck",
+    "clean": "rm -f main.js styles.css",
+    "version": "node scripts/version.mjs && git add manifest.json versions.json"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "wiki",
+    "knowledge-management",
+    "ai",
+    "virtual-links"
+  ],
+  "author": "Manus",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.21.0",
+    "eslint": "^9.0.0",
+    "obsidian": "latest",
+    "prettier": "^3.2.0",
+    "typescript": "^5.4.0"
+  }
+}

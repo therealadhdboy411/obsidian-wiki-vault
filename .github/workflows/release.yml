@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"   # e.g. 3.0.1
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Production build
+        run: npm run build
+
+      - name: Package plugin
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          ZIP="wikivault-unified-${VERSION}.zip"
+          zip "$ZIP" main.js manifest.json versions.json data.json.example
+          echo "RELEASE_ZIP=$ZIP" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "WikiVault Unified v${{ env.VERSION }}"
+          body: |
+            ## WikiVault Unified v${{ env.VERSION }}
+
+            ### Installation
+
+            **Option A — BRAT (recommended)**
+            1. Install the [BRAT plugin](https://github.com/TfTHacker/obsidian42-brat)
+            2. Add this repo: `your-username/wikivault-unified`
+
+            **Option B — Manual**
+            1. Download `wikivault-unified-${{ env.VERSION }}.zip`
+            2. Unzip into `.obsidian/plugins/wikivault-unified/`
+            3. Enable in Obsidian Settings → Community Plugins
+
+            ### Setup
+            Copy `data.json.example` → `data.json` and add your API key.
+
+            See [CHANGELOG.md](CHANGELOG.md) for what changed.
+          files: ${{ env.RELEASE_ZIP }}
+          draft: false
+          prerelease: false

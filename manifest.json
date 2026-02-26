@@ -1,0 +1,10 @@
+{
+  "id": "wikivault-unified",
+  "name": "WikiVault Unified",
+  "version": "3.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Complete knowledge management system: AI-powered wiki generation with Virtual Linker integration, smart multi-word matching, category organization, and comprehensive context injection.",
+  "author": "Manus",
+  "authorUrl": "https://manus.im",
+  "isDesktopOnly": false
+}
