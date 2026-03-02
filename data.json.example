@@ -11,9 +11,10 @@
   "runOnStartup": false,
   "runOnFileSwitch": false,
   "useCustomDirectory": true,
-  "customDirectoryName": "Vault Wiki",
+  "customDirectoryName": "Wiki",
   "showProgressNotification": true,
   "batchSize": 10,
+  "contextDepth": "partial",
 
   "useDictionaryAPI": true,
   "dictionaryAPIEndpoint": "https://api.dictionaryapi.dev/api/v2/entries/en",
@@ -42,7 +43,7 @@
   "wikipediaLinkText": "Read more on Wikipedia",
   "preserveMentionFormatting": true,
 
-  "virtualLinksEnabled": false,
+  "virtualLinksEnabled": true,
   "virtualLinkSuffix": "🔗",
   "applyDefaultLinkStyling": true,
   "matchWholeWordsOnly": true,
@@ -66,20 +67,6 @@
   "useCategories": true,
   "categories": [
     {
-      "name": "Anatomy and Physiology",
-      "path": "Wiki/Anatomy and Physiology",
-      "sourceFolder": "Notes/Anatomy",
-      "tags": ["anatomy", "physiology", "human-anatomy"],
-      "enabled": true
-    },
-    {
-      "name": "Biochemistry",
-      "path": "Wiki/Biochemistry",
-      "sourceFolder": "Notes/Biochemistry",
-      "tags": ["biochemistry", "chemistry", "molecular-biology"],
-      "enabled": true
-    },
-    {
       "name": "General",
       "path": "Wiki/General",
       "sourceFolder": "",
@@ -97,22 +84,11 @@
     "NLP": "Natural Language Processing",
     "RL": "Reinforcement Learning",
     "NN": "Neural Network",
-    "CNN": "Convolutional Neural Network",
-    "RNN": "Recurrent Neural Network",
-    "GAN": "Generative Adversarial Network",
-    "LLM": "Large Language Model",
     "RMP": "Resting Membrane Potential",
     "NMJ": "Neuromuscular Junction",
     "ACh": "Acetylcholine",
-    "AChE": "Acetylcholinesterase",
     "AP": "Action Potential",
-    "ATP": "Adenosine Triphosphate",
-    "ADP": "Adenosine Diphosphate",
-    "DNA": "Deoxyribonucleic Acid",
-    "RNA": "Ribonucleic Acid",
-    "mRNA": "Messenger RNA",
-    "tRNA": "Transfer RNA",
-    "rRNA": "Ribosomal RNA"
+    "ATP": "Adenosine Triphosphate"
   },
 
   "enableLogging": true,
