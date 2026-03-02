@@ -1,4 +1,4 @@
-# WikiVault Unified ⚡🛡️
+# WikiVault Unified
 
 > Complete knowledge management system: AI-powered wiki generation for Obsidian with link-based indexing, context depth modes, pause/resume control, structured session logging, and Virtual Linker integration.
 
@@ -8,6 +8,11 @@
 ![Version](https://img.shields.io/badge/version-3.0.0-green)
 
 ---
+
+## Note: This code is 100% AI generated, unless noted below. Use at your own risk. 
+This app was predominantly generated using Claude 4.6 Sonnet and Opus (for all features in the main.js and all text in the manifest.json) and Gemini 3 Flash (via Jules for documentation updates.)
+Feel free to contribute! I can't code myself, so I rely on AI to do it for me... I'm a medical student and don't really have the time to learn; I just want to enhance my Obsidian notebook, and any human help would be greatly appreciated! If I could code, I'd do it myself, but alas, here we are. 
+Contact me at owencs411@gmail.com if you are curious about contributing, or find any security issues! If there are any building issues, I apologize in advance; I'm on the free Claude plan and I can only do so much. 
 
 ## What It Does
 
