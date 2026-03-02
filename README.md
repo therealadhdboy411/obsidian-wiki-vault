@@ -1,11 +1,11 @@
 # WikiVault Unified ⚡🛡️
 
-> AI-powered wiki generation for Obsidian — with link-based indexing, context depth modes, pause/resume control, and structured session logging.
+> Complete knowledge management system: AI-powered wiki generation for Obsidian with link-based indexing, context depth modes, pause/resume control, structured session logging, and Virtual Linker integration.
 
 [![CI](https://github.com/your-username/wikivault-unified/actions/workflows/ci.yml/badge.svg)](https://github.com/your-username/wikivault-unified/actions/workflows/ci.yml)
 ![Obsidian](https://img.shields.io/badge/Obsidian-%3E%3D0.15.0-blueviolet)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
-![Version](https://img.shields.io/badge/version-3.1.0-green)
+![Version](https://img.shields.io/badge/version-3.0.0-green)
 
 ---
 
@@ -39,6 +39,7 @@ WikiVault Unified scans your Obsidian vault for unresolved wikilinks and automat
 | 🔤 Synonyms | Configurable abbreviation expansion (e.g. ATP → Adenosine Triphosphate) |
 | 🧠 API Response Caching | In-memory caches for Wikipedia and Dictionary — eliminates duplicate fetches |
 | ⏱️ HH:MM:SS ETA | Progress notification updates every 5 seconds with estimated time remaining |
+| 🔗 Virtual Linker | Integration for rendering virtual links to generated wiki notes |
 
 ---
 
@@ -131,13 +132,14 @@ Each log contains:
 
 ---
 
-## Safety
+## Safety & Security
 
 WikiVault Unified includes strict safety mechanisms to protect your vault:
 
-- **Write-safety guard** — All write operations pass through `assertSafeWritePath()`, which blocks any writes outside the wiki notes and log directories
-- **Path traversal protection** — Terms are sanitized via `sanitizeTermForPath()` before being used in file paths
-- **No existing file modification** — Your personal notes are never touched; only files in the wiki output directory are created or updated
+- **Write-safety guard** — All write operations pass through `assertSafeWritePath()`, which blocks any writes outside the wiki/log directories. Your personal notes are never modified.
+- **Path traversal protection** — Terms are sanitized via `sanitizeTermForPath()` to strip `..` and unsafe characters before being used in file paths.
+- **SSRF protection** — User-configurable API endpoints are validated to block `localhost` and private IP ranges.
+- **Credential safety** — The API key input is masked (`type="password"`) and stored locally in `data.json` (gitignored).
 
 ---
 
