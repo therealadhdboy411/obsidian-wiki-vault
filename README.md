@@ -164,4 +164,4 @@ npm run dev                       # watch-build
 
 ## License
 
-[Apache 2.0](LICENSE) — © Manus
+[Apache 2.0](LICENSE) — © therealadhdboy411
