@@ -1,10 +1,10 @@
 {
-  "id": "wikivault-unified",
-  "name": "WikiVault Unified",
-  "version": "3.0.0",
+  "id": "vault-wiki",
+  "name": "Vault Wiki",
+  "version": "3.4.0",
   "minAppVersion": "0.15.0",
-  "description": "Complete knowledge management system: AI-powered wiki generation with Virtual Linker integration, smart multi-word matching, category organization, and comprehensive context injection.",
-  "author": "Manus",
-  "authorUrl": "https://manus.im",
+  "description": "AI-powered wiki generation with smart multi-word matching, category organisation, Virtual Linker integration, and comprehensive context injection. By adhdboy411 & Claude.",
+  "author": "adhdboy411 & Claude",
+  "authorUrl": "https://github.com/adhdboy411",
   "isDesktopOnly": false
 }
