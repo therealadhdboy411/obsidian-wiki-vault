@@ -5,14 +5,15 @@
 [![CI](https://github.com/your-username/wikivault-unified/actions/workflows/ci.yml/badge.svg)](https://github.com/your-username/wikivault-unified/actions/workflows/ci.yml)
 ![Obsidian](https://img.shields.io/badge/Obsidian-%3E%3D0.15.0-blueviolet)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
-![Version](https://img.shields.io/badge/version-3.0.0-green)
+![Version](https://img.shields.io/badge/version-3.7.0-green)
 
 ---
 
-## Note: This code is 100% AI generated, unless noted below. Use at your own risk. 
-This app was predominantly generated using Claude 4.6 Sonnet and Opus (for all features in the main.js and all text in the manifest.json) and Gemini 3 Flash (via Jules for documentation updates.)
-Feel free to contribute! I can't code myself, so I rely on AI to do it for me... I'm a medical student and don't really have the time to learn; I just want to enhance my Obsidian notebook, and any human help would be greatly appreciated! If I could code, I'd do it myself, but alas, here we are. 
-Contact me at owencs411@gmail.com if you are curious about contributing, or find any security issues! If there are any building issues, I apologize in advance; I'm on the free Claude plan and I can only do so much. 
+## Note: This code is 100% AI generated, unless noted below. Use at your own risk.
+
+This app was predominantly generated using Claude 3.5 Sonnet and 3.7 Sonnet (for all features in the `main.js` and all text in the `manifest.json`) and Gemini 2.0 Flash (via Jules for documentation updates.)
+Feel free to contribute! I can't code myself, so I rely on AI to do it for me... I'm a medical student and don't really have the time to learn; I just want to enhance my Obsidian notebook, and any human help would be greatly appreciated! If I could code, I'd do it myself, but alas, here we are.
+Contact me at owencs411@gmail.com if you are curious about contributing, or find any security issues! If there are any building issues, I apologize in advance; I'm on the free Claude plan and I can only do so much.
 
 ## What It Does
 
@@ -30,21 +31,24 @@ WikiVault Unified scans your Obsidian vault for unresolved wikilinks and automat
 
 ## Features
 
-| Feature | Description |
-|---------|-------------|
-| 🤖 AI Summaries | Supports Mistral, OpenAI, LM Studio, and any OpenAI-compatible API |
-| ⚡ Link-Based Indexing | Only indexes terms with inbound wikilinks — ~85% smaller index than full-vault scan |
-| 🎚️ Context Depth Modes | **Partial** (default), **Full**, or **Performance** — choose speed vs. thoroughness |
-| ⏸️ Pause / Resume / Cancel | Control generation mid-run without losing progress |
-| 🛡️ Write Safety | Strict guards prevent any writes outside the wiki/log directories |
-| 📊 Performance Diagnostics | Full performance report in logs: throughput, cache hit rates, timing per phase |
-| 📂 Categories | Auto-assigns notes to subject folders based on source file path or tags |
-| 📝 Structured Logs | Session logs with error indexes, performance stats, and diagnostic reports |
-| ⚡ Priority Queue | Processes most-referenced terms first |
-| 🔤 Synonyms | Configurable abbreviation expansion (e.g. ATP → Adenosine Triphosphate) |
-| 🧠 API Response Caching | In-memory caches for Wikipedia and Dictionary — eliminates duplicate fetches |
-| ⏱️ HH:MM:SS ETA | Progress notification updates every 5 seconds with estimated time remaining |
-| 🔗 Virtual Linker | Integration for rendering virtual links to generated wiki notes |
+| Feature                    | Description                                                                         |
+| -------------------------- | ----------------------------------------------------------------------------------- |
+| 🤖 AI Summaries            | Supports Mistral, OpenAI, LM Studio, and any OpenAI-compatible API                  |
+| 🚀 LM Studio Native v1     | Stateful conversations, SSE streaming, and response_id continuity                   |
+| 💻 Hardware Optimization   | Automatic tuning for CPU, GPU, Android, and iOS hardware                            |
+| ⚡ Link-Based Indexing     | Only indexes terms with inbound wikilinks — ~85% smaller index than full-vault scan |
+| 🎚️ Context Depth Modes     | **Partial** (default), **Full**, or **Performance** — choose speed vs. thoroughness |
+| ⏸️ Pause / Resume / Cancel | Control generation mid-run without losing progress                                  |
+| 🛡️ Write Safety            | Strict guards prevent any writes outside the wiki/log directories                   |
+| 📊 Performance Diagnostics | Full performance report in logs: throughput, cache hit rates, timing per phase      |
+| 📂 Categories              | Auto-assigns notes to subject folders based on source file path, tags, or keywords  |
+| 📝 Structured Logs         | Session logs with error indexes, performance stats, and diagnostic reports          |
+| ⚡ Priority Queue          | Processes most-referenced terms first                                               |
+| 🔄 Auto-Update Pass        | Regenerates notes when source files change or summaries are missing                 |
+| 🔤 Synonyms                | Configurable abbreviation expansion (e.g. ATP → Adenosine Triphosphate)             |
+| 🧠 API Response Caching    | In-memory caches for Wikipedia and Dictionary — eliminates duplicate fetches        |
+| ⏱️ HH:MM:SS ETA            | Progress notification updates with estimated time remaining                         |
+| 🔗 Virtual Linker          | Integration for rendering virtual links to generated wiki notes                     |
 
 ---
 
@@ -59,11 +63,11 @@ WikiVault Unified is designed to never freeze your Obsidian workspace:
 
 ### Context Depth Modes
 
-| Mode | What it does | Speed |
-|------|-------------|-------|
-| **Partial** (default) | Detects `[[wikilinks]]` only, extracts surrounding paragraph | ~3× faster than Full |
-| **Full** | Detects wikilinks + virtual/fuzzy mentions via term matching | Most thorough |
-| **Performance** | Detects `[[wikilinks]]` only, extracts just the link line | ~10× faster than Full |
+| Mode                  | What it does                                                 | Speed                 |
+| --------------------- | ------------------------------------------------------------ | --------------------- |
+| **Partial** (default) | Detects `[[wikilinks]]` only, extracts surrounding paragraph | ~3× faster than Full  |
+| **Full**              | Detects wikilinks + virtual/fuzzy mentions via term matching | Most thorough         |
+| **Performance**       | Detects `[[wikilinks]]` only, extracts just the link line    | ~10× faster than Full |
 
 ---
 
@@ -97,12 +101,13 @@ On first run, the plugin will use sensible defaults. To configure:
 
 ### Supported AI Providers
 
-| Provider | Endpoint | Notes |
-|----------|----------|-------|
-| Mistral AI | `https://api.mistral.ai/v1` | Default |
-| OpenAI | `https://api.openai.com/v1` | GPT-4o, etc. |
-| LM Studio | `http://localhost:1234/v1` | Local models |
-| Any OpenAI-compatible | Custom URL | Set `apiType: openai` |
+| Provider              | Endpoint                    | Notes                                      |
+| --------------------- | --------------------------- | ------------------------------------------ |
+| Mistral AI            | `https://api.mistral.ai/v1` | Recommended for Cloud                      |
+| OpenAI                | `https://api.openai.com/v1` | GPT-4o, etc.                               |
+| LM Studio (Native v1) | `http://localhost:1234`     | Recommended for Local (stateful/streaming) |
+| LM Studio (OpenAI)    | `http://localhost:1234/v1`  | Legacy local support                       |
+| Any OpenAI-compatible | Custom URL                  | Set `apiType: openai`                      |
 
 ---
 
@@ -111,19 +116,20 @@ On first run, the plugin will use sensible defaults. To configure:
 ### Generate Wiki Notes
 
 Click the **book icon** in the left ribbon, or run the command:
+
 > **WikiVault: Generate missing Wiki notes**
 
 ### Commands
 
-| Command | Description |
-|---------|-------------|
-| Generate missing Wiki notes | Scan for unresolved links and generate notes |
-| Refresh term cache | Force-rebuild the term index |
-| **Pause wiki generation** | Pause the current generation run |
-| **Resume wiki generation** | Resume a paused generation run |
-| **Cancel wiki generation** | Cancel generation entirely |
-| Open latest log | Open the most recent session log in the editor |
-| Flush log to vault now | Write buffered log entries immediately |
+| Command                     | Description                                    |
+| --------------------------- | ---------------------------------------------- |
+| Generate missing Wiki notes | Scan for unresolved links and generate notes   |
+| Refresh term cache          | Force-rebuild the term index                   |
+| **Pause wiki generation**   | Pause the current generation run               |
+| **Resume wiki generation**  | Resume a paused generation run                 |
+| **Cancel wiki generation**  | Cancel generation entirely                     |
+| Open latest log             | Open the most recent session log in the editor |
+| Flush log to vault now      | Write buffered log entries immediately         |
 
 ### Reading Logs
 
