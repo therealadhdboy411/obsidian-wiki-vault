@@ -1,7 +1,7 @@
 {
   "name": "wikivault-unified",
-  "version": "3.0.0",
-  "description": "AI-powered wiki generation with Virtual Linker integration, smart matching, category organization, and structured logging.",
+  "version": "3.7.0",
+  "description": "AI-powered wiki generation with smart multi-word matching, category organisation, Virtual Linker integration, and comprehensive context injection. Full LM Studio REST API v1 support with hardware-aware model defaults. By adhdboy411 & Claude.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
@@ -22,7 +22,7 @@
     "ai",
     "virtual-links"
   ],
-  "author": "Manus",
+  "author": "adhdboy411 & Claude",
   "license": "Apache-2.0",
   "devDependencies": {
     "@types/node": "^20.0.0",
