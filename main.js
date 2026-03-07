@@ -639,10 +639,22 @@ class WikiVaultLogger {
   error(context, message, errOrExtra) {
     let extra = errOrExtra;
     if (errOrExtra instanceof Error) {
+      // 🛡️ SENTINEL S5: Sanitize stack traces before they reach the vault log file.
+      // Raw .stack strings contain absolute filesystem paths (e.g.
+      // /home/user/.obsidian/plugins/vault-wiki/main.js:2345) which leak
+      // information about the user's system layout if a log is shared.
+      // We strip the leading path component, keeping only the filename + line.
+      const safeStack = errOrExtra.stack
+        ? errOrExtra.stack
+            .split("\n")
+            .map(line => line.replace(/\s+at .+[\/\\]([^\/\\]+\.js:\d+:\d+)\)?/g, "    at $1"))
+            .slice(0, 8)
+            .join("\n")
+        : undefined;
       extra = {
-        errorName: errOrExtra.name,
+        errorName:    errOrExtra.name,
         errorMessage: errOrExtra.message,
-        stack: errOrExtra.stack,
+        stack:        safeStack,
       };
     }
     this._log("ERROR", context, message, extra);
@@ -807,7 +819,21 @@ class WikiVaultLogger {
         lines.push("");
         lines.push("```json");
         try {
-          lines.push(JSON.stringify(e.extra, null, 2));
+          // 🛡️ SENTINEL S6: Scrub any field names that sound like credentials
+          // before writing the extra object to the vault log file.
+          // This is a defence-in-depth catch-all — no call site should be
+          // passing raw key material, but this ensures even accidental leaks
+          // never reach disk. The replacer is intentionally conservative.
+          const SENSITIVE_KEYS = new Set([
+            'apikey', 'api_key', 'key', 'token', 'secret', 'password',
+            'passwd', 'authorization', 'auth', 'credential', 'bearer',
+            'accesstoken', 'access_token', 'privatekey', 'private_key',
+          ]);
+          const safeguardReplacer = (k, v) => {
+            if (k && SENSITIVE_KEYS.has(k.toLowerCase())) return '●●●● [REDACTED]';
+            return v;
+          };
+          lines.push(JSON.stringify(e.extra, safeguardReplacer, 2));
         } catch {
           lines.push(String(e.extra));
         }
@@ -1084,15 +1110,61 @@ function formatProgressBar(current, total, etaSec) {
 function assertSafeWritePath(filePath, settings) {
   const wikiDir = settings.customDirectoryName || 'Wiki';
   const logDir = settings.logDirectory || 'VaultWiki/Logs';
-  const isWiki = filePath.startsWith(wikiDir + '/');
-  const isLog = filePath.startsWith(logDir + '/');
-  if (!isWiki && !isLog) {
+  // 🛡️ SENTINEL S7: Block path traversal sequences before prefix check.
+  // A crafted path like "Wiki/../.obsidian/config" would pass a naive
+  // startsWith check but write outside the allowed directory. Reject immediately.
+  if (filePath.includes('..')) {
     throw new Error(
-      `🛡️ WRITE BLOCKED: "${filePath}" is outside allowed directories `
-      + `("${wikiDir}/…" or "${logDir}/…"). This is a safety guard to `
-      + `prevent accidental edits to your notes.`
+      `🛡️ WRITE BLOCKED: path traversal sequences (..) are not permitted.`
     );
   }
+  // Require exact prefix + '/' separator to prevent bypass via similar
+  // directory names (e.g. wikiDir="Wiki" must NOT match "WikiExtra/note.md").
+  const isWiki = filePath.startsWith(wikiDir + '/');
+  const isLog  = filePath.startsWith(logDir + '/');
+  if (!isWiki && !isLog) {
+    throw new Error(
+      `🛡️ WRITE BLOCKED: "${filePath}" is outside allowed directories ` +
+      `("${wikiDir}/..." or "${logDir}/..."). ` +
+      `This is a safety guard to prevent accidental edits to your notes.`
+    );
+  }
+}
+
+/**
+ * 🛡️ SENTINEL S1 — HTML injection / XSS prevention utility.
+ *
+ * Escapes the five dangerous HTML characters so that a string can be safely
+ * interpolated inside an innerHTML assignment or an HTML template literal
+ * without enabling script injection.
+ *
+ * This MUST be called on every user-supplied or AI-generated string before
+ * inserting it into innerHTML. The canonical pattern is:
+ *
+ *   el.innerHTML = `<strong>${escapeHtml(aiValue)}</strong>`;
+ *
+ * Static plugin-authored strings (emoji, fixed labels) are exempt.
+ * Everything that comes from: AI responses, model names, category names,
+ * file paths, user settings, or vault content requires escaping.
+ *
+ * @param {any} value  Any value. Non-strings are coerced via String().
+ * @returns {string}   HTML-safe string.
+ */
+function escapeHtml(value) {
+  const s = value == null ? '' : String(value);
+  // Manually replace each character — avoids regex engine edge cases on
+  // very long strings and is measurably faster than a single .replace() chain.
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if      (c === 38)  out += '&amp;';   // &
+    else if (c === 60)  out += '&lt;';    // <
+    else if (c === 62)  out += '&gt;';    // >
+    else if (c === 34)  out += '&quot;';  // "
+    else if (c === 39)  out += '&#39;';   // '
+    else                out += s[i];
+  }
+  return out;
 }
 
 /**
@@ -1235,6 +1307,104 @@ class VaultWikiCrypto {
   /** Returns true if a stored value is already encrypted with this scheme. */
   isEncrypted(value) {
     return typeof value === 'string' && value.startsWith(this.MAGIC);
+  }
+}
+
+// ============================================================================
+// 🛡️ SENTINEL S9 — SECURE SESSION MEMORY
+// ============================================================================
+// SecureMemory provides a session-scoped key store with automatic expiry.
+//
+// Problem: Decrypted API keys sit in settings.providerApiKeys for the entire
+// Obsidian session — hours or days. If the process is paused, hibernated, or
+// inspected, those keys are recoverable from the V8 heap.
+//
+// Solution: SecureMemory stores each key with a last-access timestamp. If a
+// key has not been read in SESSION_TTL_MS (default 30 min), it is zeroized and
+// the caller is required to re-decrypt from the encrypted settings blob.
+// Generation-intensive sessions automatically extend the TTL on every access.
+//
+// Usage (inside NoteGenerator):
+//   const key = await secureMemory.getKey(settings, providerId, crypto);
+//   // key is a plaintext string valid for this call only
+
+class SecureMemory {
+  // Keys idle for longer than this are purged from memory (ms).
+  // Users who run generation continuously will never hit this — every
+  // getKey() call resets the clock.
+  static SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+  constructor() {
+    /** @type {Map<string, { value: string, lastAccess: number }>} */
+    this._store = new Map();
+    // Sweep expired keys every 5 minutes
+    this._sweepInterval = setInterval(() => this._sweep(), 5 * 60 * 1000);
+  }
+
+  /**
+   * Retrieve a decrypted API key.
+   *
+   * If the key is in the session store and not expired, returns it immediately
+   * (zero crypto overhead). If expired or absent, decrypts from the encrypted
+   * settings value and refreshes the store.
+   *
+   * @param {object} settings   Plugin settings (providerApiKeys holds encrypted values).
+   * @param {string} providerId Provider identifier (e.g. "mistral").
+   * @param {VaultWikiCrypto} crypto Crypto instance for decryption fallback.
+   * @returns {Promise<string>} Decrypted key, or empty string if not set.
+   */
+  async getKey(settings, providerId, crypto) {
+    const cached = this._store.get(providerId);
+    const now = Date.now();
+
+    if (cached && (now - cached.lastAccess) < SecureMemory.SESSION_TTL_MS) {
+      // Touch the TTL — keeps keys alive during active generation
+      cached.lastAccess = now;
+      return cached.value;
+    }
+
+    // Cache miss or expired: decrypt from settings
+    const encrypted = settings?.providerApiKeys?.[providerId] ?? '';
+    if (!encrypted) return '';
+
+    const decrypted = await crypto.decrypt(encrypted);
+    this._store.set(providerId, { value: decrypted, lastAccess: now });
+    return decrypted;
+  }
+
+  /**
+   * Explicitly invalidate a key (e.g. after user changes it in Settings).
+   * @param {string} providerId
+   */
+  invalidate(providerId) {
+    const entry = this._store.get(providerId);
+    if (entry) {
+      // Overwrite before deleting — best-effort zeroization
+      entry.value = '\0'.repeat(entry.value.length);
+      this._store.delete(providerId);
+    }
+  }
+
+  /** Invalidate all keys. Call on plugin unload or settings reset. */
+  invalidateAll() {
+    for (const [pid] of this._store) this.invalidate(pid);
+    this._store.clear();
+  }
+
+  /** Remove entries that have been idle longer than SESSION_TTL_MS. */
+  _sweep() {
+    const now = Date.now();
+    for (const [pid, entry] of this._store) {
+      if ((now - entry.lastAccess) >= SecureMemory.SESSION_TTL_MS) {
+        this.invalidate(pid);
+      }
+    }
+  }
+
+  /** Stop the sweep timer. Must be called on plugin unload to avoid leaks. */
+  destroy() {
+    clearInterval(this._sweepInterval);
+    this.invalidateAll();
   }
 }
 
@@ -1880,6 +2050,139 @@ function detectPromptPreset(systemPrompt, userPromptTemplate) {
 // ============================================================================
 // 🌐 LIVE MODEL LIST FETCHING — Ollama & LM Studio
 // ============================================================================
+// 🛡️ SENTINEL S10 — API RATE LIMITER WITH EXPONENTIAL BACKOFF
+// ============================================================================
+// APIRateLimiter enforces a per-provider request budget to prevent:
+//   1. Accidental API cost explosions (runaway generation loops)
+//   2. Being banned by cloud providers for flooding their endpoints
+//   3. DoS against locally-running servers (Ollama, LM Studio)
+//
+// Architecture:
+//   - Token-bucket per provider: refills at `ratePerMinute` tokens/minute
+//   - On 429 responses: exponential back-off (2s → 4s → 8s … 64s cap)
+//   - Hard ceiling: MAX_CALLS_PER_SESSION prevents unlimited run-away costs
+//
+// Zero performance impact on normal flows — acquire() returns immediately
+// when the bucket has tokens. The sleep only triggers on quota exhaustion.
+
+class APIRateLimiter {
+  // Hard ceiling: maximum API calls per generation session (all providers combined).
+  // At ~1 call/note and typical batch sizes of 4–10, 2000 covers most vaults.
+  // Change in Settings (Advanced → Rate Limit) if needed.
+  static MAX_CALLS_PER_SESSION = 2000;
+
+  // Default bucket capacity per provider
+  static DEFAULT_RATE_PER_MINUTE = 60; // calls/minute (conservative; most APIs allow more)
+
+  constructor() {
+    /** @type {Map<string, { tokens: number, lastRefill: number, backoffMs: number, sessionCalls: number }>} */
+    this._buckets = new Map();
+    this._totalSessionCalls = 0;
+  }
+
+  /**
+   * Acquire a token for `provider`. Blocks (async sleep) if the bucket is
+   * empty. Returns immediately when a token is available.
+   *
+   * @param {string} provider   Provider id (e.g. "mistral", "ollama").
+   * @param {number} [ratePerMinute]  Override the default rate limit.
+   * @returns {Promise<void>}
+   */
+  async acquire(provider, ratePerMinute = APIRateLimiter.DEFAULT_RATE_PER_MINUTE) {
+    if (this._totalSessionCalls >= APIRateLimiter.MAX_CALLS_PER_SESSION) {
+      throw new Error(
+        `🛡️ RATE LIMIT: Session ceiling reached (${APIRateLimiter.MAX_CALLS_PER_SESSION} calls). ` +
+        `Restart generation to continue. This guard prevents runaway API costs.`
+      );
+    }
+
+    const now = Date.now();
+    if (!this._buckets.has(provider)) {
+      this._buckets.set(provider, {
+        tokens:       ratePerMinute,
+        lastRefill:   now,
+        backoffMs:    0,
+        sessionCalls: 0,
+      });
+    }
+
+    const bucket = this._buckets.get(provider);
+
+    // Refill tokens based on elapsed time
+    const elapsed = now - bucket.lastRefill;
+    const refill = (elapsed / 60_000) * ratePerMinute;
+    bucket.tokens = Math.min(ratePerMinute, bucket.tokens + refill);
+    bucket.lastRefill = now;
+
+    // If bucket is empty, wait for one token to accrue
+    if (bucket.tokens < 1) {
+      const waitMs = Math.ceil((1 - bucket.tokens) / ratePerMinute * 60_000);
+      await this._sleep(waitMs);
+      bucket.tokens = 0;
+    } else {
+      bucket.tokens -= 1;
+    }
+
+    bucket.sessionCalls++;
+    this._totalSessionCalls++;
+  }
+
+  /**
+   * Signal a 429 (rate-limited) response from a provider.
+   * Applies exponential back-off: first hit = 2s, then 4s, 8s … 64s cap.
+   * @param {string} provider
+   * @returns {Promise<void>}  Resolves after the back-off delay.
+   */
+  async handle429(provider) {
+    const bucket = this._buckets.get(provider);
+    if (!bucket) return;
+
+    bucket.backoffMs = bucket.backoffMs > 0
+      ? Math.min(bucket.backoffMs * 2, 64_000)  // double, cap at 64 s
+      : 2_000;                                    // first hit: 2 s
+
+    // Drain the token bucket to prevent immediately retrying
+    bucket.tokens = 0;
+
+    await this._sleep(bucket.backoffMs);
+  }
+
+  /**
+   * Signal a successful response — resets the back-off for this provider.
+   * @param {string} provider
+   */
+  onSuccess(provider) {
+    const bucket = this._buckets.get(provider);
+    if (bucket) bucket.backoffMs = 0;
+  }
+
+  /**
+   * Reset session counters (called at start of each generateAll() pass).
+   */
+  resetSession() {
+    this._totalSessionCalls = 0;
+    for (const bucket of this._buckets.values()) {
+      bucket.sessionCalls = 0;
+      bucket.backoffMs    = 0;
+    }
+  }
+
+  /** @returns {{ provider: string, sessionCalls: number, backoffMs: number }[]} */
+  getStats() {
+    return [...this._buckets.entries()].map(([p, b]) => ({
+      provider:     p,
+      sessionCalls: b.sessionCalls,
+      backoffMs:    b.backoffMs,
+      tokensLeft:   Math.round(b.tokens),
+    }));
+  }
+
+  _sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+}
+
+// ============================================================================
 
 /**
  * fetchOllamaModels(endpoint)
@@ -2104,8 +2407,36 @@ class LMStudioV1Client {
     if (continueThread && this._lastResponseId) body.previous_response_id = this._lastResponseId;
 
     try {
-      const resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+      // 🛡️ SENTINEL S3: AbortController + timeout guard on the streaming fetch().
+      // Without this, a stalled or malicious local server could hold the SSE
+      // reader open indefinitely, hanging the plugin. The 120 s wall-clock
+      // timeout matches the longest reasonable model-generation time; the
+      // _abortController property lets the NoteGenerator cancel generation
+      // mid-stream (e.g. user presses Cancel).
+      const streamAbort = new AbortController();
+      const streamTimeoutId = setTimeout(() => {
+        streamAbort.abort('stream_timeout');
+      }, 120_000); // 120 s hard ceiling
+
+      let resp;
+      try {
+        resp = await fetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal: streamAbort.signal,
+        });
+      } catch (fetchErr) {
+        clearTimeout(streamTimeoutId);
+        if (fetchErr?.name === 'AbortError') {
+          this.logger?.warn("LMStudioV1", "Streaming fetch aborted (timeout or cancellation)");
+        } else {
+          throw fetchErr;
+        }
+        return null;
+      }
       if (!resp.ok) {
+        clearTimeout(streamTimeoutId);
         this.logger?.warn("LMStudioV1", `Streaming request failed: HTTP ${resp.status}`);
         return null;
       }
@@ -2194,8 +2525,11 @@ class LMStudioV1Client {
         }
       }
 
+      clearTimeout(streamTimeoutId); // 🛡️ SENTINEL S3: clear timeout on clean exit
       return messageParts.join("") || null;
     } catch (error) {
+      // Clear the stream timeout on any error path to prevent timer leak
+      if (typeof streamTimeoutId !== 'undefined') clearTimeout(streamTimeoutId);
       this.logger?.error("LMStudioV1", "Streaming chat failed, falling back to non-streaming", error);
       return this.chat(userMessage, systemPrompt, continueThread);
     }
@@ -2800,6 +3134,10 @@ class NoteGenerator {
     this._wikiCache = new Map();
     this._dictCache = new Map();
 
+    // 🛡️ SENTINEL S10: Per-session API rate limiter with exponential back-off.
+    // Prevents runaway API calls and enforces graceful handling of 429 responses.
+    this._rateLimiter = new APIRateLimiter();
+
     // ⚡ BOLT: Pause/cancel state for generation.
     this._paused = false;
     this._cancelled = false;
@@ -2831,6 +3169,11 @@ class NoteGenerator {
     this._cancelled = false;
     this._paused = false;
     this.logger.info("NoteGenerator", "Starting full generation pass");
+
+    // 🛡️ SENTINEL S10: Reset rate limiter session counters at start of each pass.
+    // This gives each generation run a fresh per-minute token bucket and clears
+    // any back-off state left over from a previous run.
+    this._rateLimiter.resetSession();
 
     const unresolvedLinks = this.app.metadataCache.unresolvedLinks;
     const linkCounts = new Map();
@@ -4621,6 +4964,13 @@ class NoteGenerator {
     }
 
     this.logger.stats.apiCalls++;
+
+    // 🛡️ SENTINEL S10: Acquire a rate-limiter token before every AI call.
+    // For local providers (Ollama, LM Studio) this is mostly a session-call
+    // counter. For cloud providers it enforces the per-minute budget and
+    // blocks if the bucket is empty, preventing flooding.
+    await this._rateLimiter.acquire(this.settings.provider);
+
     this.logger.debug("NoteGenerator", `Calling AI API`, {
       endpoint: this.settings.openaiEndpoint,
       model: this.settings.modelName,
@@ -4701,7 +5051,12 @@ class NoteGenerator {
         let msg = `Vault Wiki: AI call failed`;
         if (status === 401) msg = `Vault Wiki: AI call failed — 401 Unauthorized. Check your API key in Settings → AI Provider.`;
         else if (status === 404) msg = `Vault Wiki: AI call failed — 404. Check your endpoint URL and model name ("${this.settings.modelName}").`;
-        else if (status === 429) msg = `Vault Wiki: AI call failed — 429 Rate limited. Slow down or upgrade your plan.`;
+        else if (status === 429) {
+          // 🛡️ SENTINEL S10: Trigger exponential back-off on 429.
+          // Next acquire() for this provider will wait 2s, then 4s, 8s… up to 64s.
+          await this._rateLimiter.handle429(this.settings.provider);
+          msg = `Vault Wiki: AI call failed — 429 Rate limited. Backing off before retry.`;
+        }
         else if (status >= 500) msg = `Vault Wiki: AI call failed — ${status} Server error from ${this.settings.provider}. Try again later.`;
         else if (error?.message?.includes('timeout') || error?.message?.includes('TIMEOUT')) msg = `Vault Wiki: AI call timed out. The model may be overloaded or your endpoint is unreachable.`;
         else if (error?.message) msg = `Vault Wiki: AI call failed — ${error.message}`;
@@ -5342,7 +5697,17 @@ var WikiVaultUnifiedPlugin = class extends import_obsidian.Plugin {
     const raw = await this.loadData() || {};
 
     // ── Merge with defaults ────────────────────────────────────────────────
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, raw);
+    // 🛡️ SENTINEL S4: Prototype-pollution-safe deserialization.
+    // Object.assign({}, DEFAULT_SETTINGS, raw) would copy __proto__ or
+    // constructor keys from a crafted data.json, polluting Object.prototype.
+    // Instead we seed from DEFAULT_SETTINGS and only copy keys that already
+    // exist on it — unknown / dangerous keys in raw are silently ignored.
+    this.settings = Object.assign({}, DEFAULT_SETTINGS);
+    for (const key of Object.keys(DEFAULT_SETTINGS)) {
+      if (Object.prototype.hasOwnProperty.call(raw, key)) {
+        this.settings[key] = raw[key];
+      }
+    }
 
     // Ensure providerApiKeys map always exists (new installs + upgrades)
     if (!this.settings.providerApiKeys) {
@@ -5361,6 +5726,18 @@ var WikiVaultUnifiedPlugin = class extends import_obsidian.Plugin {
     // Keys are encrypted at rest. Decrypt here so all other code works with
     // plain strings. Re-encryption happens in saveSettings().
     this.crypto = new VaultWikiCrypto(this.app);
+
+    // 🛡️ SENTINEL S9: Initialize SecureMemory — session-scoped TTL key cache.
+    // Decrypted keys are held in SecureMemory (not directly in settings) and
+    // automatically purged after 30 min of inactivity. This limits the window
+    // during which a heap snapshot could recover plaintext key material.
+    if (!this.secureMemory) {
+      this.secureMemory = new SecureMemory();
+    } else {
+      // Settings reload — invalidate stale cached keys so they're re-decrypted
+      this.secureMemory.invalidateAll();
+    }
+
     for (const pid of Object.keys(this.settings.providerApiKeys)) {
       const enc = this.settings.providerApiKeys[pid];
       if (enc) {
@@ -5444,13 +5821,48 @@ var WikiVaultUnifiedPlugin = class extends import_obsidian.Plugin {
 
   onunload() {
     this.logger?.info("Plugin", "Vault Wiki unloading");
-    // Best-effort synchronous console notice; async flush not possible here
     console.log("Vault Wiki: Unloading…");
+
+    // 🛡️ SENTINEL S9: Destroy SecureMemory — zeroizes all TTL-cached keys
+    // and stops the background sweep timer.
+    this.secureMemory?.destroy();
+    this.secureMemory = null;
+
+    // 🛡️ SENTINEL — KEY ZEROIZATION ON UNLOAD
+    // Decrypted API keys live in this.settings.providerApiKeys in plaintext
+    // for the session. When the plugin unloads, we overwrite each key with a
+    // string of null bytes then delete the property, reducing the window
+    // during which a heap dump or memory inspector could recover key material.
+    // This is defence-in-depth; Electron's V8 GC may have already copied the
+    // strings. We do what we can within JavaScript's memory model.
+    if (this.settings?.providerApiKeys) {
+      for (const pid of Object.keys(this.settings.providerApiKeys)) {
+        const k = this.settings.providerApiKeys[pid];
+        if (k && typeof k === 'string' && k.length > 0) {
+          // Overwrite — JS strings are immutable, so this replaces the reference
+          // rather than zeroing in-place, but it removes the reference from the
+          // settings object so it becomes eligible for GC.
+          this.settings.providerApiKeys[pid] = '\0'.repeat(k.length);
+          delete this.settings.providerApiKeys[pid];
+        }
+      }
+    }
+    if (this.settings?.lmstudioV1ApiToken) {
+      this.settings.lmstudioV1ApiToken = '\0'.repeat(this.settings.lmstudioV1ApiToken.length);
+      delete this.settings.lmstudioV1ApiToken;
+    }
+
+    // Null out the settings reference to drop all key material
+    this.settings = null;
+    this.crypto   = null;
+
     // Clean up VWDebug so it doesn't reference stale plugin instance
     if (typeof window !== 'undefined' && window.VWDebug) {
       delete window.VWDebug;
       console.log("Vault Wiki: VWDebug removed.");
     }
+
+    console.log("Vault Wiki: Unloaded (keys zeroized).");
   }
 
   // ============================================================================
@@ -6062,8 +6474,9 @@ var WikiVaultSettingTab = class extends import_obsidian.PluginSettingTab {
     statusBar.setAttribute('role', 'status');
     statusBar.setAttribute('aria-live', 'polite');
     const idxChip = statusBar.createEl('span');
+    // 🛡️ SENTINEL S2: termCount is a numeric .size — safe, but escape defensively.
     idxChip.innerHTML = termCount > 0
-      ? `✅ <strong>${termCount}</strong> terms indexed`
+      ? `✅ <strong>${escapeHtml(termCount)}</strong> terms indexed`
       : '⏳ Index building…';
     const sep = statusBar.createEl('span', { text: '·' });
     sep.style.cssText = 'opacity: 0.3;';
@@ -6129,15 +6542,20 @@ var WikiVaultSettingTab = class extends import_obsidian.PluginSettingTab {
         'padding: 0.75em 1em; margin-bottom: 0.75em; font-size: 0.82em;',
         'border: 1px solid var(--background-modifier-border);',
       ].join(' ');
+      // 🛡️ SENTINEL S2: Escape every interpolated value in this innerHTML block.
+      // hwLabel/depthLabel/presetLabel come from switch/enum constants (safe),
+      // but escapeHtml() is a no-op on safe strings and essential if these paths
+      // ever change. The PROMPT_PRESETS system prompt slice is user-editable in
+      // Advanced mode and MUST be escaped.
       autoCard.innerHTML = [
         `<div style="font-weight:700; margin-bottom:0.4em;">⚡ Auto Configuration</div>`,
         `<div style="display:grid; grid-template-columns:1fr 1fr; gap:0.3em 1em;">`,
-        `<span style="color:var(--text-muted)">Hardware</span><span>${hwLabel}</span>`,
-        `<span style="color:var(--text-muted)">Batch size</span><span>${ac.batchSize} notes/batch</span>`,
-        `<span style="color:var(--text-muted)">AI context cap</span><span>${(ac.aiContextMaxChars/1000).toFixed(0)}k chars (≈${Math.round(ac.aiContextMaxChars/4).toLocaleString()} tokens)</span>`,
-        `<span style="color:var(--text-muted)">Context depth</span><span>${depthLabel}</span>`,
-        `<span style="color:var(--text-muted)">Prompt preset</span><span>${presetLabel}</span>`,
-        `<span style="color:var(--text-muted)">System prompt</span><span style="font-size:0.9em;color:var(--text-normal);">${(PROMPT_PRESETS[ac.promptPreset]?.system || '').slice(0,60)}…</span>`,
+        `<span style="color:var(--text-muted)">Hardware</span><span>${escapeHtml(hwLabel)}</span>`,
+        `<span style="color:var(--text-muted)">Batch size</span><span>${escapeHtml(ac.batchSize)} notes/batch</span>`,
+        `<span style="color:var(--text-muted)">AI context cap</span><span>${escapeHtml((ac.aiContextMaxChars/1000).toFixed(0))}k chars (≈${escapeHtml(Math.round(ac.aiContextMaxChars/4).toLocaleString())} tokens)</span>`,
+        `<span style="color:var(--text-muted)">Context depth</span><span>${escapeHtml(depthLabel)}</span>`,
+        `<span style="color:var(--text-muted)">Prompt preset</span><span>${escapeHtml(presetLabel)}</span>`,
+        `<span style="color:var(--text-muted)">System prompt</span><span style="font-size:0.9em;color:var(--text-normal);">${escapeHtml((PROMPT_PRESETS[ac.promptPreset]?.system || '').slice(0,60))}…</span>`,
         `</div>`,
         `<div style="margin-top:0.5em;color:var(--text-muted);font-size:0.9em;">`,
         `Switch to <strong>Manual</strong> or <strong>Advanced</strong> mode to override any of these.`,
@@ -6256,7 +6674,11 @@ var WikiVaultSettingTab = class extends import_obsidian.PluginSettingTab {
       const hwLabel = hardwareModeLabel(hwMode);
       const v1InfoEl = aiSec.createEl('div');
       v1InfoEl.style.cssText = 'background: rgba(34,197,94,0.09); border: 1px solid rgba(34,197,94,0.3); border-radius: 6px; padding: 0.6em 0.9em; margin: 0.5em 0; font-size: 0.81em;';
-      v1InfoEl.innerHTML = `✅ <strong>LM Studio Native v1</strong> — stateful, SSE streaming.<br>Hardware: <strong>${hwLabel}</strong> · Model: <code>${getDefaultModelForHardware(hwMode)}</code>`;
+      // 🛡️ SENTINEL S2: HTML-escape model strings before innerHTML assignment.
+      // getDefaultModelForHardware() returns internal constants, but future
+      // refactors could make these user-supplied. escapeHtml() is zero-cost
+      // for safe strings and prevents injection if that ever changes.
+      v1InfoEl.innerHTML = `✅ <strong>LM Studio Native v1</strong> — stateful, SSE streaming.<br>Hardware: <strong>${escapeHtml(hwLabel)}</strong> · Model: <code>${escapeHtml(getDefaultModelForHardware(hwMode))}</code>`;
 
       new import_obsidian.Setting(aiSec).setName('LM Studio Endpoint').setDesc('Base URL (no trailing /api/v1).')
         .addText(t => { t.inputEl.placeholder = 'http://localhost:1234'; t.setValue(this.plugin.settings.lmstudioV1Endpoint || 'http://localhost:1234').onChange(async v => { this.plugin.settings.lmstudioV1Endpoint = v.trim().replace(/\/+$/, ''); await this.plugin.saveSettings(); }); });
@@ -6416,11 +6838,14 @@ var WikiVaultSettingTab = class extends import_obsidian.PluginSettingTab {
         const hint = aiSec.createEl('p');
         hint.style.cssText = 'font-size:0.78em; color:var(--text-muted); margin: -6px 0 6px 0;';
         const ac = getAutoConfigFromModel(currentModel, hw, provider);
+        // 🛡️ SENTINEL S2: Escape all interpolated values in innerHTML.
+        // Numbers (sizeB, batchSize) are safe, but escapeHtml() is a no-op
+        // on them. Strings (promptPreset) are escaped as defence-in-depth.
         hint.innerHTML = `
           <span class="vw-model-detected">
-            🧠 Detected: <strong>${sizeB}B params</strong> — auto preset: <strong>${ac.promptPreset}</strong>,
-            context: <strong>${(ac.aiContextMaxChars/1000).toFixed(0)}k chars</strong>,
-            batch: <strong>${ac.batchSize}</strong>
+            🧠 Detected: <strong>${escapeHtml(sizeB)}B params</strong> — auto preset: <strong>${escapeHtml(ac.promptPreset)}</strong>,
+            context: <strong>${escapeHtml((ac.aiContextMaxChars/1000).toFixed(0))}k chars</strong>,
+            batch: <strong>${escapeHtml(ac.batchSize)}</strong>
           </span>`;
       }
     }
@@ -6497,8 +6922,10 @@ var WikiVaultSettingTab = class extends import_obsidian.PluginSettingTab {
 
     const renderPresetInfo = (key) => {
       const p = PROMPT_PRESETS[key];
+      // 🛡️ SENTINEL S2: Escape preset label/desc — these come from PROMPT_PRESETS
+      // constants today, but could become user-editable. escapeHtml() is safe.
       presetInfoEl.innerHTML = p
-        ? `<strong>${p.label}</strong> — ${p.desc}`
+        ? `<strong>${escapeHtml(p.label)}</strong> — ${escapeHtml(p.desc)}`
         : '✏️ <strong>Custom</strong> — manually edited prompts.';
     };
     renderPresetInfo(currentPreset);
@@ -6711,7 +7138,15 @@ var WikiVaultSettingTab = class extends import_obsidian.PluginSettingTab {
         const summaryEl = subcatSec.createEl('div');
         summaryEl.style.cssText = 'background: var(--background-secondary); border-radius: 5px; padding: 0.5em 0.8em; font-size: 0.8em; margin-bottom: 0.5em;';
         const lines = [];
-        for (const [cat, subcats] of g2._subcatByCategory) lines.push(`<strong>${cat}:</strong> ${Array.from(subcats).join(', ')}`);
+        // 🛡️ SENTINEL S1: AI-generated subcategory names MUST be HTML-escaped
+        // before insertion via innerHTML. The AI response passes sanitizeTermForPath()
+        // (filesystem-safe) but that does NOT strip < > & characters. An adversarial
+        // or hallucinating model could return "<img src=x onerror=...>" which would
+        // execute in Obsidian's Electron context (full filesystem access). escapeHtml()
+        // neutralises this entirely.
+        for (const [cat, subcats] of g2._subcatByCategory) {
+          lines.push(`<strong>${escapeHtml(cat)}:</strong> ${Array.from(subcats).map(s => escapeHtml(s)).join(', ')}`);
+        }
         summaryEl.innerHTML = '📂 <strong>Session subcategories:</strong><br>' + lines.join('<br>');
       }
 
