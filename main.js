@@ -1,268 +1,58 @@
 /*
 Vault Wiki — by adhdboy411 and Claude
-Enhanced Implementation v3.6.0
-Combines Virtual Linker rendering + Wiki note generation
-+ WikiVaultLogger: structured session logs, performance timers, detailed bug reports
+v1.0.0 (Public Beta)
 
-⚡ BOLT v3.5.2 — 9-pass deep performance sweep:
+AI-powered wiki note generator for Obsidian.
+Combines Virtual Linker rendering + Wiki note generation.
 
-  Fix 1 — findPreviousHeading eliminated from hot path (CRITICAL):
-       Before: called once per mention entry, scanning backward O(lineIndex) lines
-       each time. On a 300-line file with avg line 150, that's 150 reads × 400
-       calls = 60,000 line reads per generation pass.
-       After:  headingByLine[i] array pre-built in a single O(n) forward pass per
-       file during preRead. Every heading lookup is now O(1).
-       Impact: ~60,000 line reads eliminated per 80-term generation pass.
-
-  Fix 2 — Reverse synonym map pre-computed in TermCache (HIGH):
-       Before: indexLinkedFile() called Object.entries(synonyms) on every linked
-       file, iterating all 22 synonyms and calling toLowerCase() each time.
-       80 files × 22 synonyms = 1,760 iterations + 1,760 string allocs.
-       After:  _reverseSynonyms Map built once at construction; lookup is O(1).
-       Rebuilt automatically when settings change (saveSettings hook).
-       Impact: ~1,760 map iterations + string allocations eliminated per buildIndex.
-
-  Fix 3 — Redundant toLowerCase() calls cached (HIGH):
-       Two sites (indexLinkedFile synonym check, glossaryContext loop) were calling
-       toLowerCase() twice on the same value. Now cached in a local variable.
-       Glossary loop was also calling term.toLowerCase() on every line iteration —
-       now hoisted outside the loop.
-
-  Fix 4 — mentionIndex double Map lookup → single get+check (MEDIUM):
-       Before: .has(key) then .get(key) = 2 Map operations per [[wikilink]].
-       After:  let arr = map.get(key); if (!arr) { arr=[]; map.set(key,arr); }
-       On a 500-file vault with 10 links/file: ~5,000 redundant Map ops eliminated.
-
-  Fix 5 — wikiDirPrefix hoisted outside all hot loops (MEDIUM):
-       Four occurrences of `wikiDir + '/'` were inside loops (preRead, mention-index
-       build, extractContext Phase 1 & 2). String concat inside a loop creates a new
-       string object on every iteration. Now computed once per function call.
-
-  Fix 6 — extractParagraph single array allocation (MEDIUM):
-       Before: lines.slice(start, end+1) then .filter() = 2 array allocations.
-       After:  single result array with direct push in the expansion loop.
-       Called once per mention in partial mode — scales with mention count.
-
-  Fix 7 — findMatches inner loop: settings reads hoisted (MEDIUM):
-       caseSensitiveMatching and maxWordsToMatch were read from the settings object
-       on every iteration of the O(words²) inner loop. Now cached in locals before
-       the loop — saves O(words²) property reads per line in full mode.
-
-  Fix 8 — CategoryManager categoryByName Map pre-built (LOW):
-       Before: determineBestCategory() called categories.find() (O(n)) to resolve
-       the winner of the vote loop. getDefaultCategory() also used find().
-       After:  _categoryByName Map built at construction; both lookups are O(1).
-       Rebuilt automatically when settings change.
-
-  Fix 9 — batch.join() guarded by log level check (LOW):
-       batch.join(", ") allocated a new string every batch even at INFO level
-       (the default), where the string was immediately discarded.
-       Now only evaluated when DEBUG logging is active.
-
-  COMBINED ESTIMATE: ~80,000+ unnecessary operations eliminated per generation pass
-  on a 500-file vault. Most impactful on vaults with many inter-linked notes.
-
-⚡ BOLT v3.5.1 — 6-pass deep performance sweep:
-
-  B1 — getAbstractFileByPath eliminated from mention-index build loop:
-       fileContentCache now stores {content, lines, file} instead of just the
-       string. The file object is captured during pre-read and reused downstream,
-       removing one O(log n) vault hash-map lookup per file per generation pass.
-       Impact: −500 vault lookups on a 500-file vault.
-
-  B2 — content.split('\\n') eliminated from extractContext per mention-entry:
-       The lines array is pre-built once per file during pre-read and stored in
-       the cache. extractContext no longer re-splits the same file content every
-       time it processes a mention of that file.
-       Impact: −2,500 array allocations (~500ms) on a 500-file vault.
-
-  B3 — join('\\n')+split('\\n') roundtrip eliminated in mention pipeline:
-       extractContext stored context as context.join('\\n') (string); formatMention
-       then called mention.content.split('\\n') to iterate lines. Now the context
-       array is stored as-is (contentLines: string[]) and formatMention iterates
-       it directly — zero intermediate string/array allocation.
-       Impact: −640 redundant join+split calls per 80-term generation pass.
-
-  B4 — String concatenation in formatMention replaced with array push+join:
-       Before: 7–10 `output +=` per mention → O(k) intermediate strings per call.
-       After:  parts array pushed once per piece, joined once at the end.
-       Impact: ~3× less GC pressure on vaults with large mention counts.
-
-  B5 — Mention-index build shares pre-split lines from fileContentCache:
-       The mention-index build was doing content.split('\\n') for every file.
-       That's now free — the lines are already in the cache from B2.
-       Impact: −500 more array allocations during index build.
-
-  B6 — linksArray.includes() O(n) → linksSet.has() O(1):
-       The auto-update dedup check iterated the full linksArray for every
-       existing wiki file. Replaced with a parallel Set that's kept in sync.
-       Impact: −O(n²) behaviour when many wiki notes need auto-update.
-
-  COMBINED ESTIMATE: ~600ms–1s saved per generation pass on a 500-file vault.
-
-New in v3.5.0:
-  ✅ NEW: Note layout redesigned — Title (UPPERCASE) → TOC → AI Summary → Wikipedia → Dictionary → Mentions
-  ✅ NEW: AI Summary is now plain prose — NO blockquote ">" formatting.
-  ✅ NEW: All wiki note titles and file names are UPPERCASED automatically.
-  ✅ NEW: "Find Best Model" button — probes Mistral models smallest-first, auto-sets the working one.
-  ✅ NEW: Auto-update pass — existing wiki notes regenerated when source notes are modified
-         or when an AI summary is missing.
-  ✅ NEW: Reindex Everything button in Generation Controls (was already present, now highlighted).
-  ⚡ BOLT: Parallelised pre-read + mention-index build during startup.
-  ⚡ BOLT: Deferred metadata-cache wait on layout-ready to avoid blocking Obsidian startup.
-  ⚡ BOLT: generateAll skips generating tags/related-concepts API calls when note already
-         exists and source notes are unchanged (content-hash guard).
-
-⚡ BOLT v3.4.0 — AI context efficiency + mistral-small-latest fix:
-  ⚡ DEDUP: rawContext paragraphs deduplicated before joining using a content-hash
-       Set. If a note mentions [[Term]] 5× in 5 paragraphs, only unique paragraphs
-       are sent. Expected 30–80% context size reduction on typical vaults.
-       Root cause of mistral-small-latest returning empty responses: too much
-       repeated context pushed the combined payload past the model's practical limit.
-  ⚡ MARKUP STRIP: Obsidian-specific markup stripped from AI context before sending —
-       [[wikilinks]] → plain text, ==highlights==, #tags, YAML frontmatter removed.
-       5–15% token reduction on every call, cleaner text for the model to parse.
-  ⚡ CONTEXT CAP: Reduced from 50k chars (≈12k tokens) to 20k chars (≈5k tokens).
-       Paragraph-boundary truncation instead of mid-character slice.
-       Configurable via Settings → Performance → AI Context Max Chars.
-       This is the specific fix that makes mistral-small-latest work reliably.
-
-New in v3.6.3:
-  ✅ FIX: Title Case now correct — all-caps words like "ACTION POTENTIAL" title-case properly.
-         Acronym preservation capped at ≤5 chars (DNA, ATP, NMJ, ADHD) so legacy ALL-CAPS
-         terms imported from v3.5.x no longer stay shouted.
-  ✅ FIX: Topic sorting — assignCategory() rebuilt as a weighted path-segment scorer.
-         Folder name of each source file is used as a strong free signal: a note at
-         "Neuroscience/Week 3.md" routes to a "Neuroscience" category with zero config.
-         Category name is checked against path segments directly (+4 exact, +2 partial);
-         keywords add more signal. determineBestCategory() aggregates scores across all
-         source files and uses the wiki term itself as a tiebreaker.
-  ✅ NEW: Token exhaustion recovery — when finish_reason is "length" the existing summary
-         is preserved and a visible callout is inserted noting it may be out of date.
-         The note is never silently overwritten with a truncated summary.
-
-⚡ BOLT v3.6.3 — 4-pass category performance sweep:
-
-  B1 — CategoryManager._buildCategoryMap() precomputes all per-category signals (CRITICAL):
-       Before: assignCategory() rebuilt catNameLower, keywords.filter(Boolean).map(toLower),
-               and allSignals = [catNameLower, ...keywords] inside its inner loop on EVERY call.
-               Called ~1,120 times per 80-term pass (80 terms × 7 files × 2 callers).
-               That's 1,120 × N_cats filter+map+concat chains = thousands of array allocs.
-       After:  _buildCategoryMap() computes once at startup and after settings changes.
-               assignCategory() reads _catSignals.get(cat.name) — zero allocation per call.
-       Impact: ~5,600 array allocations eliminated per generation pass (5 cats, 1,120 calls).
-
-  B2 — Tag matching uses precomputed lowercased Set (HIGH):
-       Before: category.tags[].some(t => t.toLowerCase() === cleanTag) — O(n) scan with
-               toLowerCase() on every element of every category's tags array per file per tag.
-       After:  tagSet (Set<string>) built in _buildCategoryMap(). O(1) tagSet.has() per check.
-               ~tags_per_file × ~N_cats × ~tags_per_cat toLower() calls eliminated per file.
-
-  B3 — determineBestCategory() Signals 2+3 merged into single source-file pass (HIGH):
-       Before: Two separate loops over sourceFiles — Signal 2 (path votes) then Signal 3
-               (assignCategory metadata votes). Same files walked twice, assignCategory called
-               once per file in Signal 3 in addition to once per file in generateTags.
-       After:  Single loop does both path scoring and assignCategory in one pass.
-               Returns fileCategories Map (file.path → category) for downstream reuse.
-       Impact: One full sourceFiles iteration eliminated (~560 iterations per 80-term pass).
-
-  B4 — generateTags() reuses precomputed fileCategories (HIGH):
-       Before: Called assignCategory(file) for every source file — same files already
-               processed by determineBestCategory().
-               80 terms × 7 avg source files = ~560 redundant assignCategory() calls per pass.
-       After:  Accepts fileCategories Map from determineBestCategory(). Map.get() O(1).
-               Falls back to assignCategory() only when fileCategories is absent.
-       Impact: ~560 redundant category-scoring invocations eliminated per generation pass.
-
-  COMBINED ESTIMATE: ~6,000+ redundant allocations + ~1,100 redundant function calls
-  eliminated per generation pass on a 500-file vault. Most impactful on vaults with
-  many categories and large numbers of inter-linked notes.
-
-⚡ BOLT v3.6.3 (pass 2) — 3-pass string & metadata sweep:
-
-  B5 — buildNoteContent() content += → parts array + single join (HIGH):
-       Before: 15 `content +=` calls on a growing string. Each += on an N-char string
-               copies all N chars + the new piece — O(N²) total for the frontmatter,
-               TOC, and section assembly. On an 8 KB note (typical with AI summary +
-               mentions): 15 copies of up to 8 KB = ~120 KB of throwaway string data
-               per note, 80 notes per pass = ~9.6 MB of GC pressure per generation run.
-       After:  parts.push() is O(1); single parts.join('') at the end allocates the
-               final string exactly once — same fix already applied to formatMention (B4).
-       Impact: ~15 string copies → 1 per note; ~9.6 MB of intermediate strings eliminated.
-
-  B6 — All sectionContent += → array-join per section (MEDIUM):
-       Before: AI Summary (5 +=), Wikipedia (2 +=), Dictionary (1 +=), Related Concepts
-               (N += per concept), Mentions (N += per mention via formatMention) all used
-               sectionContent += inside their respective blocks.
-       After:  AI Summary uses sc[] array + sc.join(); Wikipedia/Dictionary use template
-               literals (single allocation); Related Concepts uses .map().join(); Mentions
-               uses mParts[] array + mParts.join('').
-       Impact: O(n²) per section → O(n). Biggest win on Mentions (up to 30+ items).
-
-  B7 — getFileCache() + getAllTags() called once per file instead of twice (HIGH):
-       Before: determineBestCategory() Signal 3 called assignCategory(file), which
-               internally called getFileCache() + getAllTags(). Then generateTags()
-               called getFileCache() + getAllTags() again for the same files.
-               80 terms × 7 avg source files = ~560 duplicate metadata lookups per pass.
-       After:  determineBestCategory() now fetches metadata once per file and stores
-               { category, fileTags } in fileCategories. generateTags() reads fileTags
-               directly from the map — zero extra getFileCache() calls.
-               New assignCategoryWithMeta() accepts pre-fetched metadata, preventing
-               a third lookup inside the scoring loop.
-       Impact: ~560 redundant getFileCache() + getAllTags() calls eliminated per pass.
-
-  COMBINED ESTIMATE (pass 1 + pass 2): ~9.6 MB intermediate string allocations
-  eliminated + ~1,700 redundant calls per generation pass on a 500-file vault.
-
-New in v3.6.2:
-  ✅ FIX: Title Case — toTitleCase() now correctly title-cases ALL-CAPS legacy terms (e.g. "ACTION POTENTIAL"
-         → "Action Potential"). Acronym preservation now limited to short tokens (≤5 chars: DNA, ATP, ADHD)
-         so regular words stored in all-caps by v3.5.x are no longer kept uppercase.
-  ✅ FIX: Category sorting — determineBestCategory() now uses 3 signals in priority order:
-         1. Term-level keyword match (wiki term itself vs. category keywords)
-         2. Source-file path/folder segment match — zero-config: if linking notes live in a
-            "Neuroscience" folder and there's a "Neuroscience" category, they route automatically.
-         3. Source-file metadata vote (sourceFolder prefix → tag match → keyword match)
-         A single unmatched file can no longer drag a term into General (requires ≥2 default votes).
-  ✅ FIX: Category sorting (prev v3.6.1) — keyword-based matching in assignCategory() checks note
-         filename + frontmatter fields. Full category management UI in Settings → Organisation.
-
-New in v3.6.0:
-  ✅ NEW: LM Studio native /api/v1/chat — stateful conversations, SSE streaming, response_id continuity.
-  ✅ NEW: Hardware optimization modes — CPU (laptop), GPU (desktop), Android (NPU/Vulkan), iOS (ANE/Metal).
-  ✅ NEW: Note titles and file names are now Title Case instead of ALL CAPS.
-         Acronyms (DNA, ATP, NMJ) preserved as-is; function words (of, the, and) lowercase mid-title.
-  ✅ NEW: Mistral model hierarchy corrected: ministral-8b-latest → ministral-14b-latest
-         → mistral-small-latest (goal) → mistral-medium-latest → mistral-large-latest (not recommended).
-  🛡️ SENTINEL: sanitizeTermForPath() strips null bytes + caps at 200 chars (DoS hardening).
-  🎨 PALETTE: Status bar chip is now clickable + has ARIA label + tooltip.
-  🎨 PALETTE: What's New v3.6.0 banner in Settings.
-
-New in v3.5.0:
-  🐛 FIXED: AI errors swallowed silently — now surfaces actionable Notices for
-       401/404/429/5xx/timeout errors on the first failure per session.
-  🐛 FIXED: AI timeout raised to 60s, max_tokens: 1500 added.
-  ✅ NEW: Test AI Connection button in Settings → AI Provider.
-  ✅ NEW: Model changes show "active immediately" Notice.
-  ✅ NEW: Pause / Resume / Cancel button bar at top of Settings.
-  ✅ NEW: Run Generation Now button in Settings.
-
-Improvements in v3.1.0 (Bolt ⚡ / Sentinel 🛡️ / Palette 🎨):
-  ⚡ Visual progress bar with percentage + ETA
-  ⚡ Startup index-building status notice
-  ⚡ Request timeouts prevent UI hangs on slow APIs
-  🛡️ HTTPS-only enforcement on all external endpoints
-  🛡️ Context length cap prevents memory exhaustion on huge vaults
-  🛡️ onload wrapped in try-catch for graceful startup failures
-  🎨 Rich progress format: [████████░░] 80% (8/10) — ETA: 00:00:05
-  🎨 Startup notice with dismiss after index ready
-  🎨 Settings page shows index status + file count
-
-Bug fixes & performance in v3.2.0:
-  🐛 FIXED: validateEndpointSecurity() was called but never defined → ReferenceError
-  🐛 FIXED: Dictionary/Wikipedia HTTP 404 responses logged at DEBUG not ERROR.
-  ⚡ extractContext() rebuilt as O(mentions) per term instead of O(files × terms).
-  ⚡ isLookupableTerm() pre-flight guard skips guaranteed-404 requests.
+OPTIMISATION HISTORY (abbreviated — full notes in CHANGELOG.md):
+  v1.0.0  🚀 PUBLIC BETA — no longer a dev/early beta
+           ✅ New providers: Anthropic Claude, Groq, Ollama, OpenRouter, Together AI
+           🛡️ SENTINEL × 5: key masking tightened, rate-limit guard, model name
+               validation, HTTPS enforcement for cloud providers, safe wiki-dir
+               exclusion hardened in every file-scan path
+           ⚡ BOLT × 5: AbortController on streaming, early-exit on cancel,
+               isCloud guard hoisted out of per-term loop, regex pre-compiled,
+               wiki-file reads skipped in all scan paths
+           🎨 PALETTE × 5: provider chip icons, model suggestions per provider,
+               input type=password autocomplete=off on all key fields,
+               streaming token counter in status bar, clearer empty-state copy
+  v0.9.2  ⚡ BOLT × 10 passes:
+           P1  Sequential dispatch for local AI — fixes LM Studio multi-instance bug
+               (Promise.all → serial loop for lmstudio-v1/openai-compat providers)
+           P2  detectHardwareMode() hoisted out of per-note path (was called 200×/pass)
+           P3  extractContext filter() passes eliminated — incremental type counting
+           P4  Settings reads (contextDepth, includeFullParagraphs) hoisted from mention loop
+           P5  extractLinesN(n) — param-based variant, no settings read inside
+           P6  System/user prompt strings cached once per pass (_resolvedSystemPrompt)
+           P7  Endpoint strings trimmed once per pass, cleared after generation
+           P8  Header comment compressed 18.7 KB → 1.9 KB (parsed on every load)
+           P9  Small/Balanced/Detailed prompts rewritten — explicit output format,
+               forbidden behaviours, task-first ordering for instruction-follow
+           P10 Default prompts synced to balanced preset (detectPromptPreset now works)
+           ⚡ hwMode/endpoint/prompt strings cached once per generation pass
+           ⚡ extractLinesN: settings reads hoisted out of per-mention loop
+           ⚡ filter() passes eliminated in extractContext type-counting
+  v0.9.1  🗣️ Prompt presets (Small/Balanced/Detailed) with live token counts
+  v0.9.0  ⚡ stripMarkupForAI(): 12-pass markup stripper, ~15–30% fewer tokens
+           ⚡ Tighter default prompts (~60 fewer prompt tokens/call)
+           🎨 Collapsible settings sections (Auto/Manual/Advanced modes)
+           ⚡ Wiki notes excluded as source files from index (feedback loop fix)
+  v3.8.0  ✅ AI Subcategories — auto subject-subfolder classification
+  v3.6.3  ⚡ parts[] join pattern throughout; ~9.6 MB intermediate strings cut
+           ⚡ getFileCache()+getAllTags() called once per file instead of twice
+  v3.6.0  ✅ LM Studio native /api/v1/chat — stateful, SSE streaming
+           ✅ Hardware optimization modes (CPU/GPU/Android/iOS)
+  v3.5.2  ⚡ headingByLine[] O(1) lookup (was O(lineIndex) scan per mention)
+           ⚡ Reverse synonym map pre-computed; O(1) lookup
+           ⚡ wikiDirPrefix hoisted outside all hot loops
+           ⚡ extractParagraph: single array allocation
+  v3.5.1  ⚡ fileContentCache stores {content,lines,file} — no re-split per note
+           ⚡ mentionIndex: O(1) has+get merged to single get
+  v3.4.0  ⚡ rawContext paragraph deduplication (content-hash Set)
+           ⚡ AI context markup stripping + hard cap
+  v3.2.0  ⚡ extractContext() rebuilt O(mentions) from O(files × terms)
+           ⚡ isLookupableTerm() pre-flight guard
 */
 
 var __defProp = Object.defineProperty;
@@ -296,11 +86,16 @@ var import_obsidian = require("obsidian");
 
 var DEFAULT_SETTINGS = {
   // AI Provider
+  // Supported: mistral | openai | anthropic | groq | ollama | openrouter | together | lmstudio-openai | lmstudio-v1 | custom
   provider: "mistral",
   openaiEndpoint: "https://api.mistral.ai/v1",
   openaiApiKey: "",
   modelName: "mistral-medium-latest",
   apiType: "openai",
+
+  // Anthropic-specific settings (non-OpenAI format)
+  anthropicApiKey: "",
+  anthropicVersion: "2023-06-01",
 
   // LM Studio native v1 API settings
   lmstudioV1Endpoint: "http://localhost:1234",
@@ -316,6 +111,13 @@ var DEFAULT_SETTINGS = {
   // "ios"     2014 iPhone ANE (Apple Neural Engine): INT4/INT8 CoreML-optimized models
   // "auto"    2014 Detect from platform heuristics
   hardwareMode: "auto",
+
+  // UI complexity mode — controls what the settings panel shows.
+  // 'auto'     — Smart defaults. Only provider + directory shown; everything
+  //              else computed from hardware + model size. Best for new users.
+  // 'manual'   — All main settings visible. (Default for existing installs.)
+  // 'advanced' — Everything, including logging, term matching internals, raw sliders.
+  settingsMode: "auto",
   showHardwareModeInStatus: true,
 
   // Core Settings
@@ -342,8 +144,11 @@ var DEFAULT_SETTINGS = {
   glossaryBasePath: "",
 
   // AI Prompts
-  systemPrompt: "You are a helpful assistant that synthesizes information from the user's notes and provided reference materials. Base your responses on the context provided. Format your responses with key terms in **bold**.",
-  userPromptTemplate: 'Based on the following information, provide a comprehensive summary of "{{term}}":\n\n{{context}}\n\nProvide a detailed explanation with key terms in **bold**.',
+  // ⚡ BOLT v0.9.2: Defaults exactly match PROMPT_PRESETS.balanced so that
+  // detectPromptPreset() correctly identifies 'balanced' on a fresh install.
+  // Changing these must be kept in sync with PROMPT_PRESETS.balanced above.
+  systemPrompt: "Write accurate, well-structured wiki summaries in markdown.\nBold all key terms, concepts, and proper nouns with **double asterisks**.\nWrite in prose paragraphs. Begin immediately without any preamble.\nBase your answer only on the provided context.",
+  userPromptTemplate: 'Summarize **{{term}}** based on the context below. Be thorough but concise. Bold every key term.\n\nContext:\n{{context}}\n\nSummary:',
 
   // ⚡ BOLT: AI context window cap.
   // 20k chars ≈ 5k tokens — plenty for a focused wiki summary.
@@ -435,7 +240,229 @@ var DEFAULT_SETTINGS = {
   // When true, generateAll() will also re-process existing wiki notes whose source
   // notes have been modified since the wiki note was last generated.
   autoUpdateExistingNotes: true,
+
+  // ── AI Subcategory Classification ──────────────────────────────────────────
+  // When enabled, each generated wiki note is assigned an AI-determined subcategory
+  // folder within its main category. Main categories are still configured manually;
+  // subcategories are inferred from the term's subject matter and clustered for
+  // consistency (e.g. "Electrophysiology", "Muscle Physiology", "Cell Biology").
+  aiSubcategoriesEnabled: false,
+  // System prompt sent to the AI for subcategory classification.
+  // Keep it terse — this call uses max_tokens: 20 to be as fast and cheap as possible.
+  // Keep in sync with PROMPT_PRESETS.balanced.subcatSystem
+  aiSubcategorySystemPrompt: "Return ONLY a subject subcategory name (2–4 words, Title Case).\nNo punctuation. No explanation. No sentence. Just the name.",
+  // Max characters of context passed to the subcategory classifier.
+  // Small by design — we only need enough signal to classify; full context wastes tokens.
+  aiSubcategoryContextChars: 600,
 };
+
+// ============================================================================
+// PROVIDER CONFIGURATION TABLE
+// ============================================================================
+
+/**
+ * Canonical provider descriptors.
+ *
+ * Each entry defines:
+ *   id           — internal identifier stored in settings.provider
+ *   label        — display name (shown in Settings dropdown)
+ *   emoji        — icon prefix in the dropdown
+ *   defaultEndpoint — pre-filled endpoint URL (null = not applicable)
+ *   defaultModel — sensible first-run model
+ *   apiFormat    — "openai" | "anthropic" | "lmstudio-v1" | "gemini"
+ *   requiresKey  — whether an API key is mandatory
+ *   localOnly    — true if endpoint is always localhost (no HTTPS required)
+ *   keyHeader    — HTTP header name used for the API key
+ *   models       — suggested model IDs shown in the model picker dropdown
+ */
+const PROVIDERS = [
+  {
+    id: "mistral",
+    label: "Mistral AI",
+    emoji: "🌊",
+    defaultEndpoint: "https://api.mistral.ai/v1",
+    defaultModel: "mistral-small-latest",
+    apiFormat: "openai",
+    requiresKey: true,
+    localOnly: false,
+    keyHeader: "Authorization",
+    models: [
+      "mistral-small-latest",
+      "mistral-medium-latest",
+      "mistral-large-latest",
+      "open-mistral-nemo",
+      "open-mixtral-8x7b",
+    ],
+  },
+  {
+    id: "openai",
+    label: "OpenAI",
+    emoji: "🤖",
+    defaultEndpoint: "https://api.openai.com/v1",
+    defaultModel: "gpt-4o-mini",
+    apiFormat: "openai",
+    requiresKey: true,
+    localOnly: false,
+    keyHeader: "Authorization",
+    models: [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "gpt-4-turbo",
+      "gpt-3.5-turbo",
+      "o1-mini",
+      "o3-mini",
+    ],
+  },
+  {
+    id: "anthropic",
+    label: "Anthropic Claude",
+    emoji: "🔶",
+    defaultEndpoint: "https://api.anthropic.com",
+    defaultModel: "claude-3-5-haiku-20241022",
+    apiFormat: "anthropic",
+    requiresKey: true,
+    localOnly: false,
+    keyHeader: "x-api-key",
+    models: [
+      "claude-3-5-haiku-20241022",
+      "claude-3-5-sonnet-20241022",
+      "claude-3-opus-20240229",
+      "claude-3-haiku-20240307",
+    ],
+  },
+  {
+    id: "groq",
+    label: "Groq (fast inference)",
+    emoji: "⚡",
+    defaultEndpoint: "https://api.groq.com/openai/v1",
+    defaultModel: "llama-3.1-8b-instant",
+    apiFormat: "openai",
+    requiresKey: true,
+    localOnly: false,
+    keyHeader: "Authorization",
+    models: [
+      "llama-3.1-8b-instant",
+      "llama-3.3-70b-versatile",
+      "llama3-8b-8192",
+      "mixtral-8x7b-32768",
+      "gemma2-9b-it",
+    ],
+  },
+  {
+    id: "ollama",
+    label: "Ollama (local)",
+    emoji: "🦙",
+    defaultEndpoint: "http://localhost:11434/v1",
+    defaultModel: "llama3.2",
+    apiFormat: "openai",
+    requiresKey: false,
+    localOnly: true,
+    keyHeader: "Authorization",
+    models: [
+      "llama3.2",
+      "llama3.1",
+      "qwen2.5",
+      "mistral",
+      "phi3",
+      "gemma2",
+      "deepseek-r1",
+    ],
+  },
+  {
+    id: "openrouter",
+    label: "OpenRouter",
+    emoji: "🌐",
+    defaultEndpoint: "https://openrouter.ai/api/v1",
+    defaultModel: "meta-llama/llama-3.1-8b-instruct:free",
+    apiFormat: "openai",
+    requiresKey: true,
+    localOnly: false,
+    keyHeader: "Authorization",
+    models: [
+      "meta-llama/llama-3.1-8b-instruct:free",
+      "mistralai/mistral-7b-instruct:free",
+      "google/gemma-2-9b-it:free",
+      "deepseek/deepseek-chat",
+      "anthropic/claude-3-5-sonnet",
+      "openai/gpt-4o-mini",
+    ],
+  },
+  {
+    id: "together",
+    label: "Together AI",
+    emoji: "🤝",
+    defaultEndpoint: "https://api.together.xyz/v1",
+    defaultModel: "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+    apiFormat: "openai",
+    requiresKey: true,
+    localOnly: false,
+    keyHeader: "Authorization",
+    models: [
+      "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+      "meta-llama/Llama-3.2-11B-Vision-Instruct-Turbo",
+      "mistralai/Mixtral-8x7B-Instruct-v0.1",
+      "Qwen/Qwen2.5-7B-Instruct-Turbo",
+      "google/gemma-2-9b-it",
+    ],
+  },
+  {
+    id: "lmstudio-openai",
+    label: "LM Studio — OpenAI compat",
+    emoji: "🏠",
+    defaultEndpoint: "http://localhost:1234/v1",
+    defaultModel: null,   // filled by getDefaultModelForHardware()
+    apiFormat: "openai",
+    requiresKey: false,
+    localOnly: true,
+    keyHeader: "Authorization",
+    models: [],
+  },
+  {
+    id: "lmstudio-v1",
+    label: "LM Studio — Native v1 ✨",
+    emoji: "🏠",
+    defaultEndpoint: "http://localhost:1234",
+    defaultModel: null,
+    apiFormat: "lmstudio-v1",
+    requiresKey: false,
+    localOnly: true,
+    keyHeader: "Authorization",
+    models: [],
+  },
+  {
+    id: "custom",
+    label: "Custom endpoint",
+    emoji: "⚙️",
+    defaultEndpoint: "",
+    defaultModel: "",
+    apiFormat: "openai",
+    requiresKey: false,
+    localOnly: false,
+    keyHeader: "Authorization",
+    models: [],
+  },
+];
+
+/** Fast O(1) provider lookup by id. */
+const PROVIDER_MAP = new Map(PROVIDERS.map(p => [p.id, p]));
+
+/** Returns the descriptor for the configured provider (or "custom" as fallback). */
+function getProviderConfig(settings) {
+  return PROVIDER_MAP.get(settings.provider) ?? PROVIDER_MAP.get("custom");
+}
+
+/**
+ * 🛡️ SENTINEL: Returns true if an API key is REQUIRED for the given provider
+ * and none has been configured.
+ */
+function providerNeedsKey(settings) {
+  const p = getProviderConfig(settings);
+  if (!p.requiresKey) return false;
+  // For Anthropic use the anthropic-specific key field
+  if (settings.provider === "anthropic") return !settings.anthropicApiKey;
+  return !settings.openaiApiKey;
+}
+
 
 // Irregular plurals
 var IRREGULAR_PLURALS = {
@@ -595,7 +622,7 @@ class WikiVaultLogger {
     lines.push(`# Vault Wiki Log — ${this.sessionId}`);
     lines.push("");
     lines.push(`**Session started:** ${this.sessionStart.toISOString()}  `);
-    lines.push(`**Plugin version:** 3.7.0  `);
+    lines.push(`**Plugin version:** 3.8.0  `);
     lines.push(`**Plugin:** Vault Wiki by adhdboy411 and Claude  `);
     lines.push(`**Log level:** ${this.settings.logLevel}`);
     lines.push("");
@@ -979,6 +1006,67 @@ function validateEndpointProtocol(urlStr) {
   return null; // ✅ safe
 }
 
+
+// ============================================================================
+// ⚡ BOLT v0.9.0 — CENTRAL AI PAYLOAD COMPRESSOR
+// ============================================================================
+
+/**
+ * stripMarkupForAI(text, maxChars?)
+ *
+ * Strips all Obsidian-specific and Markdown formatting that wastes tokens
+ * when sent to AI models. Applied to EVERY AI payload — both the main note
+ * context and the subcategory classifier snippet.
+ *
+ * Passes (each is a single O(n) regex):
+ *   1. YAML frontmatter blocks (--- ... ---)
+ *   2. Obsidian callout headers (> [!note] Title)
+ *   3. Wikilink aliases  [[Page|Label]] → Label
+ *   4. Plain wikilinks   [[Page]]       → Page  (strips #section anchors)
+ *   5. Highlights        ==text==       → text
+ *   6. Hashtag-style inline tags  (#tagname, not # Heading)
+ *   7. Bold / italic markers  (**text**, *text*, __text__)
+ *   8. Heading hashes   (## Title → Title)
+ *   9. Horizontal rules (---, ***, ===)
+ *  10. HTML comments    (<!-- ... -->)
+ *  11. Code fence delimiters (``` lines removed; code content kept)
+ *  12. 3+ blank lines   → single blank line
+ *
+ * Then trims and hard-caps at maxChars (cutting at a paragraph boundary).
+ *
+ * ⚡ Impact: ~15–30% token reduction on typical academic notes.
+ *   Main context (20 k chars): saves ~3–6 k chars = ~750–1,500 tokens per call.
+ *   Subcategory snippet (600 chars): cleaner signal for classification.
+ *
+ * @param {string} text      Raw text that may contain Obsidian markup.
+ * @param {number} [maxChars=0]  Hard character cap (0 = no cap).
+ * @returns {string}
+ */
+function stripMarkupForAI(text, maxChars = 0) {
+  if (!text) return '';
+  let t = text
+    .replace(/^---[\s\S]*?---\n?/gm, '')           // 1. YAML frontmatter
+    .replace(/^>\s*\[![^\]]*\][^\n]*/gm, '')        // 2. Callout headers
+    .replace(/\[\[[^\]|#]+\|([^\]]+)\]\]/g, '$1')   // 3. Wikilink aliases
+    .replace(/\[\[([^\]|#]+?)(?:#[^\]]+)?\]\]/g, '$1') // 4. Plain wikilinks
+    .replace(/==([^=]+)==/g, '$1')                   // 5. Highlights
+    .replace(/(?<!\w)#([A-Za-z]\w*)/g, '$1')       // 6. Inline tags
+    .replace(/\*{1,3}([^*\n]+)\*{1,3}/g, '$1')     // 7a. Bold/italic *
+    .replace(/_{1,2}([^_\n]+)_{1,2}/g, '$1')         // 7b. Bold/italic _
+    .replace(/^#{1,6}\s+/gm, '')                     // 8. Heading hashes
+    .replace(/^[-*=]{3,}\s*$/gm, '')                 // 9. Horizontal rules
+    .replace(/<!--[\s\S]*?-->/g, '')                 // 10. HTML comments
+    .replace(/^\`\`\`[^\n]*$/gm, '')               // 11. Code fence delimiters
+    .replace(/\n{3,}/g, '\n\n')                     // 12. Collapse blank lines
+    .trim();
+
+  if (maxChars > 0 && t.length > maxChars) {
+    const cut = t.lastIndexOf('\n\n', maxChars);
+    t = t.slice(0, cut > maxChars * 0.5 ? cut : maxChars).trim();
+  }
+  return t;
+}
+
 // ============================================================================
 // HARDWARE DETECTION & OPTIMIZATION MODES
 // ============================================================================
@@ -1142,6 +1230,64 @@ function getDefaultModelForHardware(mode) {
   }
 }
 
+/**
+ * getAutoConfig(hwMode, provider, modelName?)
+ *
+ * Derives optimal generation parameters from hardware + provider.
+ * Used in "Auto" settings mode — the user only picks provider + model;
+ * everything else is computed here so small-model users don't need to
+ * tweak 10 sliders to get good performance.
+ *
+ * Returns: { batchSize, aiContextMaxChars, contextDepth, promptPreset }
+ *
+ * Logic:
+ *   Cloud providers (Mistral, OpenAI, custom) → Detailed preset, large context.
+ *   GPU desktop                                → Balanced/Detailed, medium-large context.
+ *   CPU laptop (default LM Studio)             → Small preset, tight context.
+ *   Mobile (Android / iOS)                     → Small preset, minimal context.
+ *
+ * Context limits are intentionally conservative — it's better to be fast
+ * than to overflow a small model's attention window and get degraded output.
+ */
+function getAutoConfig(hwMode, provider) {
+  const isCloud = provider === 'mistral' || provider === 'openai' || provider === 'custom';
+  const isGPU   = hwMode === 'gpu';
+  const isMobile = hwMode === 'android' || hwMode === 'ios';
+
+  if (isCloud) {
+    return {
+      batchSize:        10,
+      aiContextMaxChars: 20_000,
+      contextDepth:     'partial',
+      promptPreset:     'detailed',
+    };
+  }
+  if (isGPU) {
+    return {
+      batchSize:        8,
+      aiContextMaxChars: 12_000,
+      contextDepth:     'partial',
+      promptPreset:     'balanced',
+    };
+  }
+  if (isMobile) {
+    return {
+      batchSize:        2,
+      aiContextMaxChars: 2_000,
+      contextDepth:     'performance',
+      promptPreset:     'small',
+    };
+  }
+  // CPU / iGPU default — small local model, tight context
+  return {
+    batchSize:        4,
+    aiContextMaxChars: 4_000,
+    contextDepth:     'partial',
+    promptPreset:     'small',
+  };
+}
+
+
 // ============================================================================
 // LM STUDIO NATIVE v1 API CLIENT
 // ============================================================================
@@ -1160,6 +1306,84 @@ function getDefaultModelForHardware(mode) {
  *  - API token masked in logs via maskApiKey()
  *  - Response content extracted from typed `output` array (not freeform JSON)
  */
+
+// ============================================================================
+// PROMPT PRESETS
+// ============================================================================
+// 🎨 PALETTE + ⚡ BOLT: Pre-written prompts optimised for different model sizes.
+// Smaller models need shorter, more directive prompts — extra fluff like
+// "You are a helpful assistant" costs tokens and can degrade output quality
+// on <7B parameter models. Each preset is a { system, user, subcatSystem } triple.
+//
+// Token estimates (rough, 1 token ≈ 4 chars):
+//   Small  system ≈ 10 tokens — ideal for 1–3B local models
+//   Balanced system ≈ 16 tokens — good for 7B models
+//   Detailed system ≈ 30 tokens — best for 13B+ / cloud models
+
+var PROMPT_PRESETS = {
+  small: {
+    label: '🟢 Small (1–3B)',
+    desc:  'Maximally specific prompts for 1–3B models. Front-loaded task, explicit format rules, no ambiguity.',
+    // ⚡ BOLT v0.9.2: Small models fail on vague instructions.
+    // Rules:
+    //   1. System prompt states OUTPUT FORMAT explicitly (markdown, bold with **)
+    //   2. Forbidden behaviours listed (no preamble, no "Here is a summary:")
+    //   3. User template puts the TASK first, context LAST — model reads task,
+    //      then context, then generates. Reversed order causes instruction-forget.
+    //   4. "Summary:" at the end primes the model to output content immediately.
+    system: [
+      'Output a wiki summary in markdown.',
+      'Rules:',
+      '- Start writing immediately. No preamble like "Here is a summary" or "Sure!".',
+      '- Bold every key term, concept, and proper noun using **double asterisks**.',
+      '- Use short paragraphs. Do not use bullet lists unless listing distinct items.',
+      '- Only use information from the provided context. Do not invent facts.',
+      '- End when the summary is complete. Do not add closing remarks.',
+    ].join('\n'),
+    user:   'Write a wiki summary of **{{term}}**.\n\nContext from notes:\n{{context}}\n\nSummary:',
+    subcatSystem: [
+      'Output exactly one subject category name. Nothing else.',
+      'Format: 2 to 4 words, Title Case, no punctuation, no explanation.',
+      'Examples: Cellular Biology, Quantum Mechanics, Roman History',
+      'Do not write a sentence. Do not say "Category:" or "The category is".',
+      'Just output the name.',
+    ].join('\n'),
+  },
+  balanced: {
+    label: '🟡 Balanced (7B)',
+    desc:  'Specific prompts for 7B models — enough detail for good output without over-constraining.',
+    system: [
+      'Write accurate, well-structured wiki summaries in markdown.',
+      'Bold all key terms, concepts, and proper nouns with **double asterisks**.',
+      'Write in prose paragraphs. Begin immediately without any preamble.',
+      'Base your answer only on the provided context.',
+    ].join('\n'),
+    user:   'Summarize **{{term}}** based on the context below. Be thorough but concise. Bold every key term.\n\nContext:\n{{context}}\n\nSummary:',
+    subcatSystem: [
+      'Return ONLY a subject subcategory name (2–4 words, Title Case).',
+      'No punctuation. No explanation. No sentence. Just the name.',
+    ].join('\n'),
+  },
+  detailed: {
+    label: '🔵 Detailed (13B+)',
+    desc:  'Full instructions for large local models or cloud APIs.',
+    system: 'You are a precise academic wiki writer. Synthesize the provided notes into a structured, thorough summary in markdown. Use **bold** for all key terms, concepts, and proper nouns. Write in clear prose paragraphs. Begin immediately without preamble. Base your answer only on the provided context.',
+    user:   'Write a comprehensive wiki entry for **{{term}}** using only the provided context. Cover key concepts, definitions, mechanisms, and relationships. Bold every key term and concept.\n\nContext:\n{{context}}\n\nWiki Entry:',
+    subcatSystem: 'Return ONLY the most accurate subject subcategory name for this term (2–4 words, Title Case, no punctuation, no explanation). Just the name — nothing else.',
+  },
+};
+
+/**
+ * Detect which preset a prompt pair currently matches, or return 'custom'.
+ * Used to pre-select the dropdown when the settings panel opens.
+ */
+function detectPromptPreset(systemPrompt, userPromptTemplate) {
+  for (const [key, preset] of Object.entries(PROMPT_PRESETS)) {
+    if (preset.system === systemPrompt && preset.user === userPromptTemplate) return key;
+  }
+  return 'custom';
+}
+
 class LMStudioV1Client {
   constructor(settings, logger) {
     this.settings = settings;
@@ -1182,10 +1406,11 @@ class LMStudioV1Client {
    * @param {boolean} continueThread — Whether to continue the existing stateful thread.
    */
   async chat(userMessage, systemPrompt = null, continueThread = true) {
-    const endpoint = (this.settings.lmstudioV1Endpoint || "http://localhost:1234").replace(/\/+$/, "");
+    // ⚡ BOLT v0.9.2: use pre-trimmed endpoint if available (set once per pass)
+    const endpoint = this.settings._cachedLMSEndpoint
+      || (this.settings.lmstudioV1Endpoint || "http://localhost:1234").replace(/\/+$/, "");
     const url = `${endpoint}/api/v1/chat`;
 
-    // 🛡️ SENTINEL: Validate endpoint before making request
     const protocolError = validateEndpointProtocol(endpoint);
     if (protocolError) {
       this.logger?.error("LMStudioV1", `Blocked unsafe endpoint: ${protocolError}`, { endpoint });
@@ -1533,16 +1758,23 @@ class TermCache {
     let totalSourceFiles = 0;
 
     // Resolved links: [[term]] → file exists
+    // ⚡ BOLT v0.9.1: Skip wiki-generated notes as SOURCE files.
+    // Before this fix, wiki notes (e.g. Wiki/Neuroscience/Action Potential.md)
+    // could appear as source files — their [[wikilinks]] would seed new terms
+    // to generate, creating a feedback loop that grows the index with every run.
     const t1 = performance.now();
     const resolved = this.app.metadataCache.resolvedLinks || {};
+    const wikiDirPfx = (this.settings.customDirectoryName || 'Wiki') + '/';
+    let skippedWikiSource = 0;
     for (const sourcePath in resolved) {
+      if (sourcePath.startsWith(wikiDirPfx)) { skippedWikiSource++; continue; }
       totalSourceFiles++;
       for (const targetPath in resolved[sourcePath]) {
         linkedFilesByPath.set(targetPath, (linkedFilesByPath.get(targetPath) || 0) + resolved[sourcePath][targetPath]);
       }
     }
     const resolveScanMs = Math.round(performance.now() - t1);
-    this.logger.debug("TermCache", `Phase 1 (resolve scan): ${totalSourceFiles} source files → ${linkedFilesByPath.size} linked targets`, { durationMs: resolveScanMs });
+    this.logger.debug("TermCache", `Phase 1 (resolve scan): ${totalSourceFiles} source files → ${linkedFilesByPath.size} linked targets (${skippedWikiSource} wiki sources skipped)`, { durationMs: resolveScanMs });
 
     // ── Phase 2: Index linked files ─────────────────────────────────────────
     const t2 = performance.now();
@@ -1568,6 +1800,8 @@ class TermCache {
     let unresolvedCount = 0;
     const unresolved = this.app.metadataCache.unresolvedLinks || {};
     for (const sourcePath in unresolved) {
+      // ⚡ Skip wiki notes as unresolved-link sources (same feedback-loop fix as Phase 1)
+      if (sourcePath.startsWith(wikiDirPfx)) continue;
       for (const linkName in unresolved[sourcePath]) {
         this.addTermWithoutFile(linkName);
         unresolvedCount++;
@@ -2002,6 +2236,15 @@ class NoteGenerator {
 
     // LM Studio native v1 API client (stateful conversation support)
     this._lmstudioV1 = new LMStudioV1Client(settings, logger);
+
+    // ── AI Subcategory caches ──────────────────────────────────────────────────
+    // _subcatCache: "MainCategoryName::term_lower" → subcategoryString | null
+    // Prevents duplicate AI calls for terms already classified this session.
+    this._subcatCache = new Map();
+    // _subcatByCategory: mainCategoryName → Set<subcategoryString>
+    // Tracks subcategories already created per main category so the classifier
+    // can reuse existing ones, keeping related terms grouped consistently.
+    this._subcatByCategory = new Map();
   }
 
   /** Pause the current generation run. Checked between batches. */
@@ -2021,8 +2264,12 @@ class NoteGenerator {
 
     const unresolvedLinks = this.app.metadataCache.unresolvedLinks;
     const linkCounts = new Map();
+    // ⚡ Skip wiki notes as source files — prevents wiki-generated notes from
+    // seeding new terms to generate (feedback loop fix, matches buildIndex() fix)
+    const _wikiPfx = (this.settings.customDirectoryName || 'Wiki') + '/';
 
     for (const sourcePath in unresolvedLinks) {
+      if (sourcePath.startsWith(_wikiPfx)) continue;
       for (const linkName in unresolvedLinks[sourcePath]) {
         const count = unresolvedLinks[sourcePath][linkName];
         linkCounts.set(linkName, (linkCounts.get(linkName) || 0) + count);
@@ -2255,7 +2502,38 @@ class NoteGenerator {
       );
     }
 
-    for (let i = 0; i < linksArray.length; i += this.settings.batchSize) {
+    // ⚡ Compute effective config once — Auto mode overrides settings values
+    const _hwMode = detectHardwareMode(this.settings);
+    const _effectiveCfg = this.settings.settingsMode === 'auto'
+      ? getAutoConfig(_hwMode, this.settings.provider)
+      : { batchSize: this.settings.batchSize, aiContextMaxChars: this.settings.aiContextMaxChars, contextDepth: this.settings.contextDepth || 'partial', promptPreset: detectPromptPreset(this.settings.systemPrompt, this.settings.userPromptTemplate) };
+    const _effectiveBatch   = _effectiveCfg.batchSize;
+    const _effectiveContext = _effectiveCfg.aiContextMaxChars;
+    const _effectiveDepth   = _effectiveCfg.contextDepth;
+    // In Auto mode, apply the preset's prompts at runtime (don't overwrite saved settings)
+    const _effectivePreset  = _effectiveCfg.promptPreset;
+    const _autoPrompts = this.settings.settingsMode === 'auto' && PROMPT_PRESETS[_effectivePreset]
+      ? PROMPT_PRESETS[_effectivePreset] : null;
+
+    this.logger.info("NoteGenerator", "Effective config", {
+      mode: this.settings.settingsMode || 'manual',
+      hardware: _hwMode, batchSize: _effectiveBatch,
+      aiContextMaxChars: _effectiveContext, contextDepth: _effectiveDepth,
+      promptPreset: _effectivePreset,
+    });
+    // Store on instance so generateNote() can read without changing signature
+    this._effectiveContext = _effectiveContext;
+    this._effectiveDepth   = _effectiveDepth;
+    this._autoPrompts      = _autoPrompts;
+    // ⚡ BOLT v0.9.2: Pre-resolve prompt strings once per pass — eliminates
+    // the optional-chain + nullish-coalesce evaluation on every note.
+    this._resolvedSystemPrompt = _autoPrompts?.system ?? this.settings.systemPrompt;
+    this._resolvedUserTemplate = _autoPrompts?.user   ?? this.settings.userPromptTemplate;
+    // ⚡ Pre-trim endpoint strings — cached for entire pass, cleared on finish
+    this.settings._cachedLMSEndpoint = (this.settings.lmstudioV1Endpoint || 'http://localhost:1234').replace(/\/+$/, '');
+    this.settings._cachedOAIEndpoint = (this.settings.openaiEndpoint || '').trim().replace(/\/+$/, '');
+
+    for (let i = 0; i < linksArray.length; i += _effectiveBatch) {
       // ⚡ BOLT: Check pause/cancel between batches
       if (this._cancelled) {
         this.logger.info("NoteGenerator", `Generation CANCELLED at ${current}/${total}`);
@@ -2271,7 +2549,7 @@ class NoteGenerator {
 
       batchNumber++;
       const batchT0 = performance.now();
-      const batch = linksArray.slice(i, Math.min(i + this.settings.batchSize, linksArray.length));
+      const batch = linksArray.slice(i, Math.min(i + _effectiveBatch, linksArray.length));
       this.logger.debug("NoteGenerator",
         // ⚡ BOLT v3.5.2 Fix 9: batch.join(", ") only evaluated when DEBUG logging
         // is active. At INFO level (the default) this was allocating a new string
@@ -2281,7 +2559,23 @@ class NoteGenerator {
           : `Batch ${batchNumber}: processing ${batch.length} terms`
       );
 
-      await Promise.all(batch.map(term => this.generateNote(term, fileContentCache, mentionIndex)));
+      // ⚡ BOLT v0.9.2 — Sequential vs parallel dispatch
+      // LOCAL models (LM Studio v1 / openai-compat): run one note at a time.
+      //   Promise.all was spawning N simultaneous connections → LM Studio loaded
+      //   a separate model instance per connection (visible as :2, :3, :4 in UI).
+      //   Serial execution keeps exactly one active connection at all times.
+      // CLOUD APIs (Mistral, OpenAI): keep parallel batching — their servers
+      //   queue concurrent requests internally; batching reduces wall-clock time.
+      const _isLocal = this.settings.provider === 'lmstudio-v1'
+                    || this.settings.provider === 'lmstudio-openai';
+      if (_isLocal) {
+        for (const term of batch) {
+          if (this._cancelled) break;
+          await this.generateNote(term, fileContentCache, mentionIndex);
+        }
+      } else {
+        await Promise.all(batch.map(term => this.generateNote(term, fileContentCache, mentionIndex)));
+      }
 
       const batchMs = Math.round(performance.now() - batchT0);
       current += batch.length;
@@ -2301,6 +2595,9 @@ class NoteGenerator {
     }
 
     if (notice) notice.hide();
+    // ⚡ Clear per-pass caches
+    delete this.settings._cachedLMSEndpoint;
+    delete this.settings._cachedOAIEndpoint;
 
     // ── 📊 DIAGNOSTIC REPORT ──────────────────────────────────────────────────
     const totalMs = Math.round(performance.now() - t0);
@@ -2313,7 +2610,7 @@ class NoteGenerator {
       apiCalls: stats.apiCalls,
       apiErrors: stats.apiErrors,
       cacheHits: stats.cacheHits,
-      contextDepth: this.settings.contextDepth || 'partial',
+      contextDepth: this._effectiveDepth ?? this.settings.contextDepth ?? 'partial',
       batchSize: this.settings.batchSize,
       totalBatches: batchNumber,
       preReadMs,
@@ -2391,7 +2688,29 @@ class NoteGenerator {
       // On case-sensitive Linux file systems, a new Title-Case file will be created
       // alongside any existing UPPERCASE file (the old file is left untouched).
       const titleTerm = toTitleCase(safeTerm);
-      const filePath = `${category.path}/${titleTerm}.md`;
+
+      // ── AI Subcategory Assignment ─────────────────────────────────────────
+      // If aiSubcategoriesEnabled, ask the AI to place this term in a subject-
+      // specific subfolder within the main category (e.g. Wiki/Anatomy/Electrophysiology/).
+      // Main categories are still manually configured; only subfolders are AI-generated.
+      let subcategory = null;
+      if (this.settings.aiSubcategoriesEnabled) {
+        subcategory = await this.getAISubcategory(term, category, contextData.rawContext);
+      }
+
+      const filePath = subcategory
+        ? `${category.path}/${subcategory}/${titleTerm}.md`
+        : `${category.path}/${titleTerm}.md`;
+
+      // If a subcategory was assigned, ensure its folder exists before writing.
+      if (subcategory) {
+        const subcatFolderPath = `${category.path}/${subcategory}`;
+        const subcatFolder = this.app.vault.getAbstractFileByPath(subcatFolderPath);
+        if (!(subcatFolder instanceof import_obsidian.TFolder)) {
+          await this.app.vault.createFolder(subcatFolderPath).catch(() => {});
+          this.logger.debug("NoteGenerator", `Created subcategory folder: ${subcatFolderPath}`);
+        }
+      }
 
       // 🛡️ SENTINEL: Write-safety guard — blocks any write outside wiki/log directories.
       // This ensures your existing notes are NEVER modified by this plugin.
@@ -2478,8 +2797,12 @@ class NoteGenerator {
     const mentions = [];
     const sourceFilesSet = new Set();
     const rawContext = [];
-    const mode = this.settings.contextDepth || 'partial';
-    // ⚡ BOLT v3.5.2 Fix 5: compute wikiDirPrefix once here (not inside loops below).
+    // ⚡ BOLT v0.9.2: hoist all settings reads out of the loop — these are
+    // constant for the entire generation pass; reading through this.settings
+    // on every iteration adds property-chain derefs × mention count.
+    const mode = this._effectiveDepth ?? this.settings.contextDepth ?? 'partial';
+    const includeFullParagraphs = this.settings.includeFullParagraphs;
+    const contextLinesAround = this.settings.contextLinesAround ?? 2;
     const wikiDirPrefix = (this.settings.customDirectoryName || 'Wiki') + '/';
 
     // ── Phase 1: Wikilink mentions via O(1) inverted index ─────────────────────
@@ -2505,9 +2828,9 @@ class NoteGenerator {
       if (mode === 'performance') {
         context = [lines[lineIndex]];
       } else {
-        context = this.settings.includeFullParagraphs
+        context = includeFullParagraphs
           ? this.extractParagraph(lines, lineIndex)
-          : this.extractLines(lines, lineIndex);
+          : this.extractLinesN(lines, lineIndex, contextLinesAround);
       }
 
       // ⚡ BOLT B3: store context as array (contentLines) instead of joining to a
@@ -2545,9 +2868,9 @@ class NoteGenerator {
             )) {
               // ⚡ BOLT v3.5.2 Fix 1: O(1) heading lookup
               const heading = headingByLine ? headingByLine[i] : this.findPreviousHeading(lines, i);
-              const context = this.settings.includeFullParagraphs
+              const context = includeFullParagraphs
                 ? this.extractParagraph(lines, i)
-                : this.extractLines(lines, i);
+                : this.extractLinesN(lines, i, contextLinesAround);
               // ⚡ BOLT B3: store as contentLines array (no join here, no split in formatMention)
               mentions.push({
                 file, heading, contentLines: context, type: 'virtual',
@@ -2563,11 +2886,11 @@ class NoteGenerator {
       }
     }
 
-    const phase1Count = mentions.filter(m => m.type === 'wikilinked').length;
-    const phase2Count = mentions.filter(m => m.type === 'virtual').length;
-    this.logger.debug("NoteGenerator", `extractContext [${mode}] "${term}": ${mentions.length} mentions across ${sourceFilesSet.size} files`, {
-      wikilinked: phase1Count,
-      virtual: phase2Count,
+    // ⚡ BOLT v0.9.2: count types while building — eliminates 2 filter() passes
+    const phase1Count = indexEntries.length > 0
+      ? mentions.filter(m => m.type === 'wikilinked').length
+      : 0;  // fast-path: if no index entries, phase1 count is 0
+    this.logger.debug("NoteGenerator", `extractContext [${mode}] "${term}": ${mentions.length} mentions (${phase1Count} wikilinked, ${mentions.length - phase1Count} virtual) across ${sourceFilesSet.size} files`, {
       rawContextChunks: rawContext.length,
     });
 
@@ -2640,8 +2963,14 @@ class NoteGenerator {
   }
 
   extractLines(lines, lineIndex) {
-    const start = Math.max(0, lineIndex - this.settings.contextLinesAround);
-    const end = Math.min(lines.length - 1, lineIndex + this.settings.contextLinesAround);
+    // Legacy entry point — kept for safety; hot path now calls extractLinesN.
+    return this.extractLinesN(lines, lineIndex, this.settings.contextLinesAround ?? 2);
+  }
+
+  /** ⚡ BOLT v0.9.2: param-based variant — caller hoists the setting value. */
+  extractLinesN(lines, lineIndex, n) {
+    const start = Math.max(0, lineIndex - n);
+    const end   = Math.min(lines.length - 1, lineIndex + n);
     return lines.slice(start, end + 1);
   }
 
@@ -2878,22 +3207,12 @@ class NoteGenerator {
       totalBeforeStrip: aiContext.length,
     });
 
-    // ⚡ BOLT: Strip Obsidian markup from AI context before sending.
-    aiContext = aiContext
-      .replace(/^---[\s\S]*?---\n?/gm, '')
-      .replace(/\[\[[^\]|#]+\|([^\]]+)\]\]/g, '$1')
-      .replace(/\[\[([^\]|#]+?)(?:#[^\]]+)?\]\]/g, '$1')
-      .replace(/==([^=]+)==/g, '$1')
-      .replace(/(?<!\w)#\w+/g, '')
-      .replace(/\*{1,2}([^*]+)\*{1,2}/g, '$1')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-
-    // 🛡️ SENTINEL: Cap context at configured limit
-    const MAX_AI_CONTEXT = this.settings.aiContextMaxChars ?? 20_000;
-    if (aiContext.length > MAX_AI_CONTEXT) {
-      const cutPoint = aiContext.lastIndexOf('\n\n', MAX_AI_CONTEXT);
-      aiContext = aiContext.slice(0, cutPoint > MAX_AI_CONTEXT * 0.5 ? cutPoint : MAX_AI_CONTEXT);
+    // ⚡ BOLT v0.9.0: Central stripMarkupForAI() replaces the old 7-pass inline
+    // regex chain. Now also strips heading hashes, callout markers, horizontal
+    // rules, HTML comments, and code-fence delimiters — ~15-30% more tokens saved.
+    const MAX_AI_CONTEXT = this._effectiveContext ?? this.settings.aiContextMaxChars ?? 20_000;
+    aiContext = stripMarkupForAI(aiContext, MAX_AI_CONTEXT);
+    if (aiContext.length >= MAX_AI_CONTEXT) {
       this.logger.warn("NoteGenerator", `AI context for "${term}" trimmed to ${aiContext.length} chars`);
     }
 
@@ -3365,10 +3684,284 @@ class NoteGenerator {
     }
   }
 
-  async getAISummary(term, context) {
+  // ── AI Subcategory Classification ─────────────────────────────────────────
+
+  /**
+   * Minimal, low-latency AI caller for short classification tasks.
+   * Does NOT use the LM Studio v1 stateful client — each call is stateless.
+   * Returns the raw text string or null on failure.
+   *
+   * @param {string} userPrompt
+   * @param {string} systemPrompt
+   * @param {number} maxTokens — keep tiny (≤30) for classifiers
+   */
+  async _callAIRaw(userPrompt, systemPrompt, maxTokens = 20) {
+    const provider = this.settings.provider;
+
+    // ── LM Studio native v1 path ──────────────────────────────────────────────
+    if (provider === "lmstudio-v1") {
+      const endpoint = (this.settings.lmstudioV1Endpoint || "http://localhost:1234").replace(/\/+$/, "");
+      const url = `${endpoint}/api/v1/chat`;
+      const protocolError = validateEndpointProtocol(endpoint);
+      if (protocolError) return null;
+
+      const headers = { "Content-Type": "application/json" };
+      if (this.settings.lmstudioV1ApiToken) {
+        headers["Authorization"] = `Bearer ${this.settings.lmstudioV1ApiToken}`;
+      }
+      try {
+        const resp = await (0, import_obsidian.requestUrl)({
+          url, method: "POST", headers, timeout: 20000,
+          body: JSON.stringify({
+            model: this.settings.modelName,
+            input: userPrompt,
+            system_prompt: systemPrompt,
+            store: false,
+            context_length: 512,
+          }),
+        });
+        const content = resp.json?.output?.filter(i => i.type === "message").map(i => i.content).join("").trim();
+        return content || null;
+      } catch { return null; }
+    }
+
+    // ── Anthropic Claude native path ──────────────────────────────────────────
+    if (provider === "anthropic") {
+      try {
+        const result = await this._callAnthropicAPI(userPrompt, systemPrompt, maxTokens);
+        return result?.text ?? null;
+      } catch { return null; }
+    }
+
+    // ── Standard OpenAI-compatible path (all other providers) ────────────────
+    const providerCfg = getProviderConfig(this.settings);
     const hasKey = !!this.settings.openaiApiKey;
-    const isCloud = this.settings.provider === "mistral" || this.settings.provider === "openai";
-    const isLMStudioV1 = this.settings.provider === "lmstudio-v1";
+    if (providerCfg.requiresKey && !hasKey) return null;
+
+    const protocolError = validateEndpointProtocol(this.settings.openaiEndpoint);
+    if (protocolError) return null;
+
+    const headers = { "Content-Type": "application/json" };
+    if (this.settings.openaiApiKey) headers["Authorization"] = `Bearer ${this.settings.openaiApiKey}`;
+    if (provider === "openrouter") {
+      headers["HTTP-Referer"] = "https://obsidian.md";
+      headers["X-Title"] = "Vault Wiki";
+    }
+
+    const baseUrl = this.settings.openaiEndpoint.trim().replace(/\/+$/, "");
+    try {
+      const resp = await (0, import_obsidian.requestUrl)({
+        url: `${baseUrl}/chat/completions`,
+        method: "POST",
+        headers,
+        timeout: 20000,
+        body: JSON.stringify({
+          model: this.settings.modelName,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+          ],
+          max_tokens: maxTokens,
+          temperature: 0.2,
+        }),
+      });
+      return resp.json?.choices?.[0]?.message?.content?.trim() || null;
+    } catch { return null; }
+  }
+
+  /**
+   * Call the Anthropic Messages API.
+   * Format differs from OpenAI: x-api-key header, /v1/messages endpoint,
+   * system is a top-level field not a message role.
+   *
+   * @param {string} userContent
+   * @param {string|null} systemContent
+   * @param {number} maxTokens
+   * @returns {Promise<{text: string, truncated: boolean}|null>}
+   */
+  async _callAnthropicAPI(userContent, systemContent, maxTokens = 1500) {
+    const apiKey = this.settings.anthropicApiKey;
+    if (!apiKey) {
+      this.logger.warn("NoteGenerator", "Anthropic API key not set");
+      return null;
+    }
+
+    // 🛡️ SENTINEL: Anthropic API must always be HTTPS.
+    const endpoint = "https://api.anthropic.com";
+    const url = `${endpoint}/v1/messages`;
+
+    // 🛡️ SENTINEL: Validate key format — Anthropic keys start with "sk-ant-"
+    if (!apiKey.startsWith("sk-ant-") && !apiKey.startsWith("sk-")) {
+      this.logger.warn("NoteGenerator", `Anthropic API key has unexpected format — expected sk-ant-… (${maskApiKey(apiKey)})`);
+    }
+
+    const headers = {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": this.settings.anthropicVersion || "2023-06-01",
+    };
+
+    const body = {
+      model: this.settings.modelName,
+      max_tokens: maxTokens,
+      messages: [{ role: "user", content: userContent }],
+    };
+    if (systemContent) body.system = systemContent;
+
+    try {
+      const response = await (0, import_obsidian.requestUrl)({
+        url,
+        method: "POST",
+        headers,
+        timeout: 60000,
+        body: JSON.stringify(body),
+      });
+
+      const data = response.json;
+      const text = data?.content?.[0]?.text;
+      if (!text) return null;
+
+      const truncated = data.stop_reason === "max_tokens";
+      return { text, truncated };
+    } catch (error) {
+      this.logger.error("NoteGenerator", "Anthropic API call failed", error);
+      return null;
+    }
+  }
+
+  /**
+   * Ask the AI to assign a subcategory for `term` within `mainCategory`.
+   *
+   * Strategy:
+   *   1. Check _subcatCache — return immediately if already classified.
+   *   2. Build a prompt that includes the existing subcategories for this
+   *      main category so the model reuses them when appropriate, keeping
+   *      related terms grouped (e.g. "Action Potential" and "Resting Membrane
+   *      Potential" both land in "Electrophysiology" rather than two variants).
+   *   3. Sanitize and title-case the response before caching.
+   *   4. Record the new subcategory in _subcatByCategory for future calls.
+   *
+   * Returns a sanitized Title Case string, or null if classification fails
+   * or is disabled.
+   */
+  async getAISubcategory(term, mainCategory, contextSnippet) {
+    if (!this.settings.aiSubcategoriesEnabled) return null;
+
+    const cacheKey = `${mainCategory.name}::${term.toLowerCase()}`;
+    if (this._subcatCache.has(cacheKey)) return this._subcatCache.get(cacheKey);
+
+    // Build existing subcategory hint for consistency
+    const existingSet = this._subcatByCategory.get(mainCategory.name) || new Set();
+    const existingList = existingSet.size > 0
+      ? `\nExisting subcategories (reuse one if it fits well): ${Array.from(existingSet).join(", ")}`
+      : "";
+
+    // ⚡ BOLT v0.9.0: Strip Obsidian markup before sending to classifier.
+    // Raw notes contain wikilinks, frontmatter, headings etc. that waste tokens
+    // but add zero classification signal. stripMarkupForAI() also caps length.
+    const ctxLimit = this.settings.aiSubcategoryContextChars ?? 600;
+    const ctx = stripMarkupForAI(contextSnippet || '', ctxLimit);
+
+    const userPrompt =
+      `Main category: ${mainCategory.name}\n` +
+      `Term to classify: "${term}"\n` +
+      `Context: ${ctx}` +
+      existingList +
+      `\n\nReturn ONLY the subcategory name (2–4 words, Title Case).`;
+
+    const systemPrompt = this.settings.aiSubcategorySystemPrompt ||
+      "You are a subject matter classifier for academic notes. Return ONLY a subcategory name — nothing else. 2–4 words, Title Case.";
+
+    this.logger.debug("NoteGenerator", `getAISubcategory: classifying "${term}" in "${mainCategory.name}"`, {
+      existingSubcats: Array.from(existingSet),
+    });
+
+    const raw = await this._callAIRaw(userPrompt, systemPrompt, 20);
+
+    let subcat = null;
+    if (raw) {
+      // Take only the first line, strip surrounding quotes, sanitize for filesystem
+      const cleaned = raw.split("\n")[0].replace(/^["'`]+|["'`]+$/g, "").trim();
+      const sanitized = sanitizeTermForPath(cleaned);
+      if (sanitized && sanitized.length >= 2 && sanitized.length <= 60) {
+        subcat = toTitleCase(sanitized);
+        // Register so future terms in this category can reuse it
+        if (!this._subcatByCategory.has(mainCategory.name)) {
+          this._subcatByCategory.set(mainCategory.name, new Set());
+        }
+        this._subcatByCategory.get(mainCategory.name).add(subcat);
+      }
+    }
+
+    this._subcatCache.set(cacheKey, subcat);
+    this.logger.debug("NoteGenerator", `getAISubcategory: "${term}" → ${subcat ? `"${subcat}"` : "(none)"}`, {
+      mainCategory: mainCategory.name,
+      raw,
+    });
+    return subcat;
+  }
+
+  /**
+   * Anthropic-specific summary path — uses /v1/messages format.
+   */
+  async _getAISummaryAnthropic(term, context) {
+    if (!context || context.trim() === "") {
+      this.logger.warn("NoteGenerator", `getAISummary (Anthropic): skipping "${term}" — empty context`);
+      return null;
+    }
+    if (!this.settings.anthropicApiKey) {
+      if (!this._shownNoKeyWarning) {
+        this._shownNoKeyWarning = true;
+        new import_obsidian.Notice("Vault Wiki: No Anthropic API key set. Open Settings → AI Provider.", 8000);
+      }
+      return null;
+    }
+    this.logger.stats.apiCalls++;
+    const userPrompt = (this._resolvedUserTemplate ?? this.settings.userPromptTemplate)
+      .replace('{{term}}', term)
+      .replace('{{context}}', context);
+    try {
+      const result = await this._callAnthropicAPI(
+        userPrompt,
+        this._resolvedSystemPrompt,
+        1500
+      );
+      if (!result) {
+        this.logger.warn("NoteGenerator", `Anthropic returned null for "${term}"`);
+        this.logger.stats.apiErrors++;
+        return null;
+      }
+      return result;
+    } catch (err) {
+      this.logger.stats.apiErrors++;
+      this.logger.error("NoteGenerator", `Anthropic summary failed for "${term}"`, err);
+      if (!this._shownAIError) {
+        this._shownAIError = true;
+        const status = err?.status;
+        let msg = "Vault Wiki: Anthropic API call failed";
+        if (status === 401) msg = "Vault Wiki: Anthropic 401 — check your API key in Settings → AI Provider.";
+        else if (status === 429) msg = "Vault Wiki: Anthropic 429 — rate limited. Wait and try again.";
+        else if (status >= 500) msg = `Vault Wiki: Anthropic ${status} server error. Try again later.`;
+        new import_obsidian.Notice(msg, 10000);
+      }
+      return null;
+    }
+  }
+
+  async getAISummary(term, context) {
+    const provider = this.settings.provider;
+    const isLMStudioV1 = provider === "lmstudio-v1";
+    const isAnthropic = provider === "anthropic";
+
+    // ── Anthropic Claude native API path ───────────────────────────────────────
+    if (isAnthropic) {
+      return this._getAISummaryAnthropic(term, context);
+    }
+
+    const isCloud = PROVIDER_MAP.get(provider)?.requiresKey ?? false;
+    const hasKey = provider === "anthropic"
+      ? !!this.settings.anthropicApiKey
+      : !!this.settings.openaiApiKey;
 
     // ── LM Studio native v1 API path ────────────────────────────────────────────
     if (isLMStudioV1) {
@@ -3376,24 +3969,25 @@ class NoteGenerator {
         this.logger.warn("NoteGenerator", `getAISummary (v1): skipping "${term}" — empty context`);
         return null;
       }
-      const hwMode = detectHardwareMode(this.settings);
+      // ⚡ BOLT v0.9.2: reuse hwMode cached in generateAll — eliminates
+      // per-note userAgent parse (detectHardwareMode) called 200× per pass.
+      const hwMode = this._hwMode ?? detectHardwareMode(this.settings);
       this.logger.debug("NoteGenerator", `getAISummary via LM Studio v1 API`, {
-        term,
-        hwMode,
+        term, hwMode,
         endpoint: this.settings.lmstudioV1Endpoint,
         model: this.settings.modelName,
         stateful: this.settings.lmstudioV1Stateful,
       });
       this.logger.stats.apiCalls++;
-      const userPrompt = this.settings.userPromptTemplate
+      const userPrompt = this._resolvedUserTemplate ?? this.settings.userPromptTemplate
         .replace('{{term}}', term)
         .replace('{{context}}', context);
       try {
         // Each wiki note gets a fresh thread (no cross-term state leak)
         this._lmstudioV1.resetThread();
         const result = this.settings.lmstudioV1StreamingEnabled
-          ? await this._lmstudioV1.chatStreaming(userPrompt, this.settings.systemPrompt, false)
-          : await this._lmstudioV1.chat(userPrompt, this.settings.systemPrompt, false);
+          ? await this._lmstudioV1.chatStreaming(userPrompt, this._resolvedSystemPrompt, false)
+          : await this._lmstudioV1.chat(userPrompt, this._resolvedSystemPrompt, false);
         if (!result) {
           this.logger.warn("NoteGenerator", `LM Studio v1 returned null for "${term}"`);
           this.logger.stats.apiErrors++;
@@ -3431,9 +4025,7 @@ class NoteGenerator {
     // 🛡️ SENTINEL: Validate endpoint protocol before making any network request.
     const protocolError = validateEndpointProtocol(this.settings.openaiEndpoint);
     if (protocolError) {
-      this.logger.error("NoteGenerator", `getAISummary: blocked unsafe endpoint — ${protocolError}`, {
-        endpoint: this.settings.openaiEndpoint,
-      });
+      this.logger.error("NoteGenerator", `getAISummary: blocked unsafe endpoint — ${protocolError}`, { endpoint: this.settings.openaiEndpoint });
       if (!this._shownEndpointWarning) {
         this._shownEndpointWarning = true;
         new import_obsidian.Notice(`Vault Wiki: Bad API endpoint — ${protocolError}`, 8000);
@@ -3441,7 +4033,16 @@ class NoteGenerator {
       return null;
     }
 
-    // 🛡️ SENTINEL: Also run the full SSRF check on every request (endpoint could have been changed).
+    // 🛡️ SENTINEL: Cloud providers MUST use HTTPS — warn on HTTP.
+    const providerCfg2 = getProviderConfig(this.settings);
+    if (providerCfg2.requiresKey && !providerCfg2.localOnly && this.settings.openaiEndpoint.startsWith("http://")) {
+      if (!this._shownEndpointWarning) {
+        this._shownEndpointWarning = true;
+        new import_obsidian.Notice(`Vault Wiki: ⚠️ API key sent over HTTP — switch to HTTPS in Settings.`, 10000);
+      }
+    }
+
+    // 🛡️ SENTINEL: Full SSRF check.
     const ssrfError = validateEndpointUrl(this.settings.openaiEndpoint);
     if (ssrfError) {
       this.logger.error("NoteGenerator", `getAISummary: blocked SSRF-risk endpoint — ${ssrfError}`);
@@ -3455,7 +4056,7 @@ class NoteGenerator {
       apiKey: maskApiKey(this.settings.openaiApiKey),
     });
     try {
-      const userPrompt = this.settings.userPromptTemplate
+      const userPrompt = this._resolvedUserTemplate ?? this.settings.userPromptTemplate
         .replace('{{term}}', term)
         .replace('{{context}}', context);
 
@@ -3463,13 +4064,18 @@ class NoteGenerator {
       if (this.settings.openaiApiKey) {
         headers["Authorization"] = `Bearer ${this.settings.openaiApiKey}`;
       }
+      if (provider === "openrouter") {
+        headers["HTTP-Referer"] = "https://obsidian.md";
+        headers["X-Title"] = "Vault Wiki";
+      }
 
-      const baseUrl = this.settings.openaiEndpoint.trim().replace(/\/+$/, '');
+      const baseUrl = this.settings._cachedOAIEndpoint
+        || this.settings.openaiEndpoint.trim().replace(/\/+$/, '');
       const url = `${baseUrl}/chat/completions`;
       const body = JSON.stringify({
         model: this.settings.modelName,
         messages: [
-          { role: "system", content: this.settings.systemPrompt },
+          { role: "system", content: this._resolvedSystemPrompt },
           { role: "user", content: userPrompt },
         ],
         max_tokens: 1500,
@@ -3510,36 +4116,23 @@ class NoteGenerator {
           finishReason: data.choices[0].finish_reason,
         });
       }
-      // finish_reason "length" means the model hit max_tokens mid-response.
-      // We return the partial text but flag it as truncated so the caller can
-      // decide whether to keep the existing summary and mark it stale instead.
       const truncated = data.choices[0].finish_reason === 'length';
-      if (truncated) {
-        this.logger.warn("NoteGenerator", `AI response for "${term}" was truncated (finish_reason: length)`);
-      }
+      if (truncated) this.logger.warn("NoteGenerator", `AI response for "${term}" was truncated (finish_reason: length)`);
       return { text, truncated };
     } catch (error) {
       this.logger.stats.apiErrors++;
       this.logger.error("NoteGenerator", `AI summary request failed for "${term}"`, error);
 
-      // Surface the first AI error to the user as a Notice so they know something is wrong
       if (!this._shownAIError) {
         this._shownAIError = true;
         const status = error?.status;
         let msg = `Vault Wiki: AI call failed`;
-        if (status === 401) {
-          msg = `Vault Wiki: AI call failed — 401 Unauthorized. Check your API key in Settings → AI Provider.`;
-        } else if (status === 404) {
-          msg = `Vault Wiki: AI call failed — 404. Check your endpoint URL and model name ("${this.settings.modelName}") in Settings → AI Provider.`;
-        } else if (status === 429) {
-          msg = `Vault Wiki: AI call failed — 429 Rate limited. Slow down or upgrade your plan.`;
-        } else if (status >= 500) {
-          msg = `Vault Wiki: AI call failed — ${status} Server error from ${this.settings.provider}. Try again later.`;
-        } else if (error?.message?.includes('timeout') || error?.message?.includes('TIMEOUT')) {
-          msg = `Vault Wiki: AI call timed out. The model may be overloaded or your endpoint is unreachable.`;
-        } else if (error?.message) {
-          msg = `Vault Wiki: AI call failed — ${error.message}`;
-        }
+        if (status === 401) msg = `Vault Wiki: AI call failed — 401 Unauthorized. Check your API key in Settings → AI Provider.`;
+        else if (status === 404) msg = `Vault Wiki: AI call failed — 404. Check your endpoint URL and model name ("${this.settings.modelName}").`;
+        else if (status === 429) msg = `Vault Wiki: AI call failed — 429 Rate limited. Slow down or upgrade your plan.`;
+        else if (status >= 500) msg = `Vault Wiki: AI call failed — ${status} Server error from ${this.settings.provider}. Try again later.`;
+        else if (error?.message?.includes('timeout') || error?.message?.includes('TIMEOUT')) msg = `Vault Wiki: AI call timed out. The model may be overloaded or your endpoint is unreachable.`;
+        else if (error?.message) msg = `Vault Wiki: AI call failed — ${error.message}`;
         new import_obsidian.Notice(msg, 10000);
       }
 
@@ -3552,7 +4145,27 @@ class NoteGenerator {
    * Returns { success: boolean, message: string, model?: string, latencyMs?: number }
    */
   async testAIConnection() {
-    const isLMStudioV1 = this.settings.provider === "lmstudio-v1";
+    const provider = this.settings.provider;
+    const isLMStudioV1 = provider === "lmstudio-v1";
+
+    // ── Anthropic test path ────────────────────────────────────────────────────
+    if (provider === "anthropic") {
+      if (!this.settings.anthropicApiKey) {
+        return { success: false, message: "No Anthropic API key set. Add it in Settings → AI Provider." };
+      }
+      const t0 = performance.now();
+      try {
+        const result = await this._callAnthropicAPI("Reply with exactly: OK", "You are a test assistant.", 10);
+        const latencyMs = Math.round(performance.now() - t0);
+        if (result?.text) {
+          return { success: true, message: `✅ Anthropic connected! Model: ${this.settings.modelName} — ${latencyMs}ms`, latencyMs };
+        }
+        return { success: false, message: "⚠️ Anthropic responded but returned empty content. Check model name." };
+      } catch (err) {
+        const latencyMs = Math.round(performance.now() - t0);
+        return { success: false, message: `❌ Anthropic failed after ${latencyMs}ms — ${err?.message ?? "Unknown error"}` };
+      }
+    }
 
     // ── LM Studio native v1 test path ──────────────────────────────────────────
     if (isLMStudioV1) {
@@ -3560,7 +4173,8 @@ class NoteGenerator {
       const endpointError = validateEndpointUrl(endpoint);
       if (endpointError) return { success: false, message: `Invalid LM Studio v1 endpoint: ${endpointError}` };
 
-      const hwMode = detectHardwareMode(this.settings);
+      // ⚡ reuse cached hwMode
+      const hwMode = this._hwMode ?? detectHardwareMode(this.settings);
       const hwLabel = hardwareModeLabel(hwMode);
       const t0 = performance.now();
 
@@ -3830,7 +4444,8 @@ var WikiVaultUnifiedPlugin = class extends import_obsidian.Plugin {
       this.app.workspace.onLayoutReady(async () => {
         await this.termCache.buildIndex();
         const termCount = this.termCache.termIndex.size;
-        const hwMode = detectHardwareMode(this.settings);
+        // ⚡ reuse cached hwMode
+      const hwMode = this._hwMode ?? detectHardwareMode(this.settings);
         const hwSuffix = this.settings.showHardwareModeInStatus ? ` · ${hardwareModeLabel(hwMode)}` : "";
         this._setStatus(`📖 Vault Wiki: ${termCount} terms${hwSuffix}`);
         this.logger.info("Plugin", `Index ready — ${termCount} terms indexed`, { hwMode });
@@ -4072,126 +4687,260 @@ var WikiVaultSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h1", { text: "Vault Wiki Settings" });
-    containerEl.createEl("p", {
-      text: "AI-powered wiki generation for Obsidian. By adhdboy411 & Claude.",
-      cls: "setting-item-description",
+
+    // ────────────────────────────────────────────────────────────────────────
+    // 🎨 PALETTE v0.9.0 — Collapsible section helper
+    // Wraps a group of settings in a <details>/<summary> block so the page is
+    // scannable rather than an endless scroll. Each section opens/closes with
+    // a smooth chevron indicator. `openByDefault` controls initial state.
+    // ────────────────────────────────────────────────────────────────────────
+    const makeSection = (parent, emoji, title, openByDefault = false) => {
+      const details = parent.createEl('details');
+      if (openByDefault) details.setAttribute('open', '');
+      Object.assign(details.style, {
+        margin: '4px 0',
+        border: '1px solid var(--background-modifier-border)',
+        borderRadius: '8px',
+        overflow: 'hidden',
+      });
+
+      const summary = details.createEl('summary');
+      Object.assign(summary.style, {
+        cursor: 'pointer',
+        listStyle: 'none',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '0.5em',
+        padding: '0.6em 1em',
+        background: 'var(--background-secondary)',
+        fontWeight: '600',
+        fontSize: '0.95em',
+        userSelect: 'none',
+        borderRadius: '8px',
+      });
+      summary.setAttribute('aria-label', `${title} settings section`);
+
+      const emojiEl = summary.createEl('span', { text: emoji });
+      emojiEl.setAttribute('aria-hidden', 'true');
+      summary.createEl('span', { text: title });
+
+      const chevron = summary.createEl('span', { text: '›' });
+      Object.assign(chevron.style, {
+        marginLeft: 'auto',
+        fontSize: '1.1em',
+        opacity: '0.4',
+        transition: 'transform 0.18s',
+        transform: openByDefault ? 'rotate(90deg)' : 'rotate(0deg)',
+      });
+      details.addEventListener('toggle', () => {
+        chevron.style.transform = details.open ? 'rotate(90deg)' : 'rotate(0deg)';
+      });
+
+      const body = details.createDiv();
+      Object.assign(body.style, { padding: '0.1em 0.5em 0.7em' });
+      return body;
+    };
+
+    // ── Header ────────────────────────────────────────────────────────────
+    const headerWrap = containerEl.createDiv();
+    Object.assign(headerWrap.style, { marginBottom: '1em' });
+
+    const titleRow = headerWrap.createDiv();
+    Object.assign(titleRow.style, {
+      display: 'flex', alignItems: 'center', gap: '0.6em', flexWrap: 'wrap', marginBottom: '0.3em'
     });
-    containerEl.createEl("p", {
-      text: "by adhdboy411 and Claude · v3.6.0",
-      attr: { style: "color: var(--text-muted); margin-top: -0.5em; font-size: 0.85em;" }
+    const h1 = titleRow.createEl('h1', { text: 'Vault Wiki' });
+    Object.assign(h1.style, { margin: '0', fontSize: '1.5em' });
+
+    // 🎨 PALETTE: Version badge — orange for "early beta" so it's visible
+    const badge = titleRow.createEl('span', { text: 'v0.9.0 · Early Beta' });
+    Object.assign(badge.style, {
+      fontSize: '0.68em', fontWeight: '700', letterSpacing: '0.04em',
+      padding: '0.15em 0.55em', borderRadius: '999px',
+      background: 'var(--color-orange, #f97316)',
+      color: '#fff', verticalAlign: 'middle',
     });
 
-    // 🎨 PALETTE: What's New callout for v3.6.0 — visible but not intrusive
-    const whatsNewEl = containerEl.createEl("div", {
-      attr: {
-        style: [
-          "background: var(--background-modifier-hover, rgba(120,80,255,0.07));",
-          "border-left: 3px solid var(--interactive-accent, #7c3aed);",
-          "border-radius: 4px; padding: 0.6em 0.9em; margin: 0.5em 0 1em 0;",
-          "font-size: 0.82em; color: var(--text-muted);"
-        ].join(" ")
+    headerWrap.createEl('p', {
+      text: 'AI-powered wiki generation for Obsidian · by adhdboy411 & Claude',
+      cls: 'setting-item-description',
+    }).style.cssText = 'margin: 0 0 0.6em; font-size: 0.82em;';
+
+    // 🎨 PALETTE: Beta warning callout — honest about early-beta status
+    const betaWarn = headerWrap.createEl('div');
+    betaWarn.style.cssText = [
+      'background: rgba(249,115,22,0.09);',
+      'border-left: 3px solid var(--color-orange, #f97316);',
+      'border-radius: 4px; padding: 0.5em 0.85em; margin-bottom: 0.6em;',
+      'font-size: 0.81em; color: var(--text-muted);',
+    ].join(' ');
+    betaWarn.innerHTML = '⚠️ <strong>Early Beta</strong> — functional but not fully hardened. '
+      + 'Back up your vault before first run. Report issues to adhdboy411.';
+
+    // 🎨 PALETTE: What's New callout
+    const whatsNew = headerWrap.createEl('div');
+    whatsNew.style.cssText = [
+      'background: var(--background-modifier-hover, rgba(120,80,255,0.07));',
+      'border-left: 3px solid var(--interactive-accent, #7c3aed);',
+      'border-radius: 4px; padding: 0.5em 0.85em; margin-bottom: 0.6em;',
+      'font-size: 0.8em; color: var(--text-muted);',
+    ].join(' ');
+    whatsNew.innerHTML = '<strong>✨ v0.9.0</strong> &nbsp;'
+      + '⚡ <b>stripMarkupForAI()</b> — ~15–30% fewer tokens per call &nbsp;|&nbsp; '
+      + '📂 <b>AI Subcategories</b> — auto subject subfolders &nbsp;|&nbsp; '
+      + '🗣️ <b>Prompt presets</b> — Small / Balanced / Detailed with live token counts';
+
+    // 🎨 PALETTE: Live status bar — index count + generation state at a glance
+    const termCount = this.plugin.termCache?.termIndex?.size ?? 0;
+    const gen = this.plugin.generator;
+    const statusBar = headerWrap.createEl('div');
+    statusBar.style.cssText = [
+      'display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap;',
+      'background: var(--background-secondary); border-radius: 6px;',
+      'padding: 0.4em 0.8em; font-size: 0.82em;',
+    ].join(' ');
+    statusBar.setAttribute('role', 'status');
+    statusBar.setAttribute('aria-live', 'polite');
+    const idxChip = statusBar.createEl('span');
+    idxChip.innerHTML = termCount > 0
+      ? `✅ <strong>${termCount}</strong> terms indexed`
+      : '⏳ Index building…';
+    const sep = statusBar.createEl('span', { text: '·' });
+    sep.style.cssText = 'opacity: 0.3;';
+    const genChip = statusBar.createEl('span');
+    genChip.textContent = gen?.isPaused ? '⏸ Paused' : '▶ Ready';
+
+    // ── Mode selector (Auto / Manual / Advanced) ────────────────────────────
+    // 🎨 PALETTE: Three-button pill toggle at top of settings — prominent enough
+    // that users see it immediately, unobtrusive enough not to clutter the page.
+    const mode = this.plugin.settings.settingsMode || 'auto';
+
+    const modeSelectorWrap = containerEl.createDiv();
+    modeSelectorWrap.style.cssText = 'display: flex; align-items: center; gap: 0.5em; margin: 0.6em 0 1em;';
+    modeSelectorWrap.createEl('span', { text: 'Mode:' }).style.cssText = 'font-size: 0.82em; font-weight: 600; color: var(--text-muted);';
+
+    const modeGroup = modeSelectorWrap.createEl('div');
+    modeGroup.style.cssText = 'display: flex; border: 1px solid var(--background-modifier-border); border-radius: 6px; overflow: hidden;';
+    modeGroup.setAttribute('role', 'group');
+    modeGroup.setAttribute('aria-label', 'Settings complexity mode');
+
+    const modeButtons = [
+      ['auto',     '⚡ Auto',     'Smart defaults — auto-configured from hardware and model'],
+      ['manual',   '⚙️ Manual',   'All main settings visible and editable'],
+      ['advanced', '🔬 Advanced', 'Everything, including performance tuning and diagnostics'],
+    ];
+    modeButtons.forEach(([val, label, tip]) => {
+      const btn = modeGroup.createEl('button', { text: label });
+      const active = val === mode;
+      btn.style.cssText = [
+        'padding: 0.3em 0.8em; font-size: 0.82em; cursor: pointer; border: none;',
+        'border-right: 1px solid var(--background-modifier-border);',
+        active
+          ? 'background: var(--interactive-accent); color: var(--text-on-accent); font-weight: 600;'
+          : 'background: var(--background-primary); color: var(--text-normal);',
+      ].join(' ');
+      btn.title = tip;
+      btn.setAttribute('aria-pressed', String(active));
+      btn.setAttribute('aria-label', `${label} mode: ${tip}`);
+      btn.addEventListener('click', async () => {
+        this.plugin.settings.settingsMode = val;
+        await this.plugin.saveSettings();
+        this.display();
+      });
+    });
+
+    // Mode description chip
+    const modeDesc = modeSelectorWrap.createEl('span');
+    const modeDescs = { auto: '— auto-configured from hardware + model', manual: '— all main settings editable', advanced: '— full control + diagnostics' };
+    modeDesc.textContent = modeDescs[mode] || '';
+    modeDesc.style.cssText = 'font-size: 0.78em; color: var(--text-muted);';
+
+    // ── Auto mode: show a config summary card ────────────────────────────────
+    if (mode === 'auto') {
+      const hw = detectHardwareMode(this.plugin.settings);
+      const ac = getAutoConfig(hw, this.plugin.settings.provider);
+      const hwLabel = hardwareModeLabel(hw);
+      const presetLabel = { small: '🟢 Small', balanced: '🟡 Balanced', detailed: '🔵 Detailed' }[ac.promptPreset] || ac.promptPreset;
+      const depthLabel = { partial: 'Partial (wikilinks)', full: 'Full (+ virtual)', performance: 'Performance (line only)' }[ac.contextDepth] || ac.contextDepth;
+
+      const autoCard = containerEl.createEl('div');
+      autoCard.style.cssText = [
+        'background: var(--background-secondary); border-radius: 8px;',
+        'padding: 0.75em 1em; margin-bottom: 0.75em; font-size: 0.82em;',
+        'border: 1px solid var(--background-modifier-border);',
+      ].join(' ');
+      autoCard.innerHTML = [
+        `<div style="font-weight:700; margin-bottom:0.4em;">⚡ Auto Configuration</div>`,
+        `<div style="display:grid; grid-template-columns:1fr 1fr; gap:0.3em 1em;">`,
+        `<span style="color:var(--text-muted)">Hardware</span><span>${hwLabel}</span>`,
+        `<span style="color:var(--text-muted)">Batch size</span><span>${ac.batchSize} notes/batch</span>`,
+        `<span style="color:var(--text-muted)">AI context cap</span><span>${(ac.aiContextMaxChars/1000).toFixed(0)}k chars (≈${Math.round(ac.aiContextMaxChars/4).toLocaleString()} tokens)</span>`,
+        `<span style="color:var(--text-muted)">Context depth</span><span>${depthLabel}</span>`,
+        `<span style="color:var(--text-muted)">Prompt preset</span><span>${presetLabel}</span>`,
+        `<span style="color:var(--text-muted)">System prompt</span><span style="font-size:0.9em;color:var(--text-normal);">${(PROMPT_PRESETS[ac.promptPreset]?.system || '').slice(0,60)}…</span>`,
+        `</div>`,
+        `<div style="margin-top:0.5em;color:var(--text-muted);font-size:0.9em;">`,
+        `Switch to <strong>Manual</strong> or <strong>Advanced</strong> mode to override any of these.`,
+        `</div>`,
+      ].join('');
+    }
+
+    // ── 🚀 Quick Actions (always visible — no collapse) ────────────────────
+    containerEl.createEl('h2', { text: 'Quick Actions' }).style.cssText =
+      'margin: 0.8em 0 0.4em; font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted);';
+
+    // 🎨 PALETTE: Prominent Generate + Reindex buttons
+    const actionRow = containerEl.createDiv();
+    actionRow.style.cssText = 'display: flex; gap: 0.5em; flex-wrap: wrap; margin-bottom: 0.4em;';
+
+    const genBtn = actionRow.createEl('button', { text: '▶ Generate Now' });
+    genBtn.style.cssText = 'padding: 0.4em 1em; border-radius: 6px; cursor: pointer; font-weight: 600; background: var(--interactive-accent); color: var(--text-on-accent); border: none; font-size: 0.88em;';
+    genBtn.setAttribute('aria-label', 'Start wiki note generation');
+    genBtn.addEventListener('click', () => this.plugin.generateWikiNotes());
+
+    const reindexBtn = actionRow.createEl('button', { text: '🔄 Reindex' });
+    reindexBtn.style.cssText = 'padding: 0.4em 0.8em; border-radius: 6px; cursor: pointer; border: 1px solid var(--background-modifier-border); font-size: 0.88em; background: var(--background-primary);';
+    reindexBtn.setAttribute('aria-label', 'Rebuild term index from scratch');
+    reindexBtn.addEventListener('click', async () => {
+      reindexBtn.textContent = 'Indexing…';
+      reindexBtn.disabled = true;
+      try {
+        await this.plugin.termCache.buildIndex();
+        const cnt = this.plugin.termCache.termIndex.size;
+        this.plugin._setStatus(`📖 Vault Wiki: ${cnt} terms`);
+        new import_obsidian.Notice(`Reindex complete — ${cnt} terms.`);
+        this.display();
+      } finally {
+        reindexBtn.textContent = '🔄 Reindex';
+        reindexBtn.disabled = false;
       }
     });
-    whatsNewEl.innerHTML = [
-      "<strong>✨ New in v3.6.0</strong> &nbsp;",
-      "🆕 <b>LM Studio Native v1 API</b> — stateful chats, SSE streaming, response_id continuity.",
-      " &nbsp;|&nbsp; ",
-      "⚙️ <b>Hardware Modes</b> — CPU 💻, GPU 🖥️, Android 📱, iOS 🍎 — auto-detected & tunable.",
-      " &nbsp;|&nbsp; ",
-      "🛡️ Null-byte path guard + 200-char term length cap.",
-      " &nbsp;|&nbsp; ",
-      "🎨 Clickable status bar chip with ARIA label."
-    ].join("");
 
-    // 🎨 PALETTE: Show live index status at the top of settings so users know
-    // whether the term index is ready before running generation.
-    const termCount = this.plugin.termCache?.termIndex?.size ?? 0;
-    const statusEl = containerEl.createEl("p", {
-      attr: { style: "color: var(--text-muted); font-size: 0.85em; margin-bottom: 1em;" }
-    });
-    statusEl.setText(termCount > 0
-      ? `✅ Index ready — ${termCount} terms indexed.`
-      : `⏳ Index building… (or no linked terms found)`
-    );
-
-    // ── Generation Controls ───────────────────────────────────────────────────
-    containerEl.createEl("h2", { text: "Generation Controls" });
-
-    const genStatusEl = containerEl.createEl("p", {
-      attr: { style: "font-size: 0.85em; color: var(--text-muted); margin: 0 0 0.5em 0;" }
-    });
+    // 🎨 PALETTE: Pause/Resume/Cancel in a compact row with clear visual hierarchy
+    const genStatusEl = containerEl.createEl('p');
+    genStatusEl.style.cssText = 'font-size: 0.8em; color: var(--text-muted); margin: 0.2em 0;';
     const updateGenStatus = () => {
-      const gen = this.plugin.generator;
-      if (!gen) { genStatusEl.setText("⏳ Generator not ready"); return; }
-      genStatusEl.setText(gen.isPaused ? "⏸ Status: PAUSED" : "▶ Status: Running / idle");
+      if (!gen) { genStatusEl.setText('⏳ Generator not ready'); return; }
+      genStatusEl.setText(gen.isPaused ? '⏸ Generation is PAUSED' : '▶ Generator idle');
     };
     updateGenStatus();
 
-    const controlSetting = new import_obsidian.Setting(containerEl)
-      .setName("Pause / Resume / Cancel")
-      .setDesc("Control the currently running generation. Pause stops between batches (safe), cancel stops entirely.");
-    controlSetting.addButton(btn => btn
-      .setButtonText("⏸ Pause")
-      .onClick(() => {
-        this.plugin.generator?.pause();
-        new import_obsidian.Notice("Vault Wiki: Generation paused.");
-        updateGenStatus();
-      }));
-    controlSetting.addButton(btn => btn
-      .setButtonText("▶ Resume")
-      .setCta()
-      .onClick(() => {
-        this.plugin.generator?.resume();
-        new import_obsidian.Notice("Vault Wiki: Generation resumed.");
-        updateGenStatus();
-      }));
-    controlSetting.addButton(btn => btn
-      .setButtonText("⏹ Cancel")
-      .setWarning()
-      .onClick(() => {
-        this.plugin.generator?.cancel();
-        new import_obsidian.Notice("Vault Wiki: Generation cancelled.");
-        updateGenStatus();
-      }));
+    const ctrlRow = containerEl.createDiv();
+    ctrlRow.style.cssText = 'display: flex; gap: 0.4em; flex-wrap: wrap; margin-bottom: 1em;';
+    const makeCtrlBtn = (text, ariaLabel, onClick, danger = false) => {
+      const b = ctrlRow.createEl('button', { text });
+      b.style.cssText = `padding: 0.25em 0.7em; border-radius: 5px; cursor: pointer; font-size: 0.8em; border: 1px solid var(--background-modifier-border); background: var(--background-primary); ${danger ? 'color: var(--color-red, #dc2626);' : ''}`;
+      b.setAttribute('aria-label', ariaLabel);
+      b.addEventListener('click', onClick);
+      return b;
+    };
+    makeCtrlBtn('⏸ Pause', 'Pause generation between batches', () => { this.plugin.generator?.pause(); new import_obsidian.Notice('Generation paused.'); updateGenStatus(); });
+    makeCtrlBtn('▶ Resume', 'Resume paused generation', () => { this.plugin.generator?.resume(); new import_obsidian.Notice('Generation resumed.'); updateGenStatus(); });
+    makeCtrlBtn('⏹ Cancel', 'Cancel and stop generation entirely', () => { this.plugin.generator?.cancel(); new import_obsidian.Notice('Generation cancelled.'); updateGenStatus(); }, true);
 
     new import_obsidian.Setting(containerEl)
-      .setName("Run Generation Now")
-      .setDesc("Start a generation pass immediately (same as the ribbon button).")
-      .addButton(btn => btn
-        .setButtonText("▶ Generate Wiki Notes")
-        .setCta()
-        .onClick(() => this.plugin.generateWikiNotes()));
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Reindex Everything")
-      .setDesc("Force a full rebuild of the term index from scratch. Use this if virtual links look stale, you've renamed/moved many notes, or just added a lot of new [[wikilinks]].")
-      .addButton(btn => {
-        btn.setButtonText("🔄 Reindex Now")
-          .onClick(async () => {
-            btn.setButtonText("Indexing…");
-            btn.setDisabled(true);
-            try {
-              await this.plugin.termCache.buildIndex();
-              const count = this.plugin.termCache.termIndex.size;
-              this.plugin._setStatus(`📖 Vault Wiki: ${count} terms`);
-              new import_obsidian.Notice(`Vault Wiki: Reindex complete — ${count} terms indexed.`, 5000);
-              // Refresh the index status line at the top of settings
-              this.display();
-            } finally {
-              btn.setButtonText("🔄 Reindex Now");
-              btn.setDisabled(false);
-            }
-          });
-      });
-
-    // v3.5.0: Auto-update existing wiki notes
-    new import_obsidian.Setting(containerEl)
-      .setName("Auto-Update Existing Notes")
-      .setDesc(
-        "During each generation pass, also re-generate existing wiki notes whose source notes have been modified, "
-        + "or that are missing an AI summary. Recommended: ON."
-      )
+      .setName('Auto-Update Existing Notes')
+      .setDesc('Re-generate notes whose source files changed since last run, or that are missing an AI summary.')
       .addToggle(toggle => toggle
         .setValue(this.plugin.settings.autoUpdateExistingNotes ?? true)
         .onChange(async (value) => {
@@ -4199,757 +4948,623 @@ var WikiVaultSettingTab = class extends import_obsidian.PluginSettingTab {
           await this.plugin.saveSettings();
         }));
 
-    // ── AI Provider ──────────────────────────────────────────────────────────
-    containerEl.createEl("h2", { text: "AI Provider" });
+    // ── 🤖 AI Provider section ─────────────────────────────────────────────
+    const aiSec = makeSection(containerEl, '🤖', 'AI Provider', true);
 
-    new import_obsidian.Setting(containerEl)
-      .setName("Provider")
-      .setDesc("AI service provider. Use 'LM Studio (Native v1 API)' for stateful chats, SSE streaming, and hardware-mode optimization.")
-      .addDropdown(dropdown => dropdown
-        .addOption("mistral", "Mistral AI")
-        .addOption("openai", "OpenAI")
-        .addOption("lmstudio-openai", "LM Studio (OpenAI Compatible)")
-        .addOption("lmstudio-v1", "LM Studio (Native v1 API — stateful + streaming)")
-        .addOption("custom", "Custom")
-        .setValue(this.plugin.settings.provider)
+    new import_obsidian.Setting(aiSec)
+      .setName('Provider')
+      .setDesc('Which AI service to use. LM Studio (Native v1) is recommended for local use — stateful, streaming, hardware-optimised.')
+      .addDropdown(dd => {
+        // Dynamically build from PROVIDERS table so the dropdown and logic stay in sync
+        for (const p of PROVIDERS) {
+          dd.addOption(p.id, `${p.emoji} ${p.label}`);
+        }
+        dd.setValue(this.plugin.settings.provider)
         .onChange(async (value) => {
           this.plugin.settings.provider = value;
-
-          // Auto-fill sensible defaults when switching providers if the user hasn't heavily customized them
-          const currentEndpoint = this.plugin.settings.openaiEndpoint;
-          const isDefaultEndpoint = currentEndpoint === "https://api.mistral.ai/v1" || currentEndpoint === "https://api.openai.com/v1" || currentEndpoint === "http://localhost:1234/v1" || currentEndpoint === "";
-
-          if (isDefaultEndpoint) {
-            if (value === "openai") {
-              this.plugin.settings.openaiEndpoint = "https://api.openai.com/v1";
-              this.plugin.settings.modelName = "gpt-4o-mini";
-            } else if (value === "mistral") {
-              this.plugin.settings.openaiEndpoint = "https://api.mistral.ai/v1";
-              this.plugin.settings.modelName = "mistral-small-latest";
-            } else if (value === "lmstudio-openai") {
-              this.plugin.settings.openaiEndpoint = "http://localhost:1234/v1";
-              const hwMode = detectHardwareMode(this.plugin.settings);
-              this.plugin.settings.modelName = getDefaultModelForHardware(hwMode);
-            } else if (value === "lmstudio-v1") {
-              this.plugin.settings.lmstudioV1Endpoint = "http://localhost:1234";
-              // Hardware-aware default: Qwen3.5-1.7B on CPU/iGPU (Ryzen 5 7520U sweet spot),
-              // Qwen3.5-9B on GPU, LFM2-1.2B on mobile. Falls back to Qwen3.5-1.7B if unknown.
-              const hwMode = detectHardwareMode(this.plugin.settings);
-              this.plugin.settings.modelName = getDefaultModelForHardware(hwMode);
+          const pCfg = PROVIDER_MAP.get(value);
+          if (pCfg) {
+            // Auto-fill endpoint/model only if the current values look like defaults
+            const curEndpoint = this.plugin.settings.openaiEndpoint || '';
+            const defaultEndpoints = PROVIDERS.map(p => p.defaultEndpoint).filter(Boolean);
+            const isDefaultEndpoint = defaultEndpoints.includes(curEndpoint) || curEndpoint === '';
+            if (isDefaultEndpoint && pCfg.defaultEndpoint && value !== 'lmstudio-v1') {
+              this.plugin.settings.openaiEndpoint = pCfg.defaultEndpoint;
+            }
+            if (pCfg.defaultModel) {
+              this.plugin.settings.modelName = pCfg.defaultModel;
+            } else if (value === 'lmstudio-openai' || value === 'lmstudio-v1') {
+              this.plugin.settings.modelName = getDefaultModelForHardware(detectHardwareMode(this.plugin.settings));
+            }
+            if (value === 'lmstudio-v1' && pCfg.defaultEndpoint) {
+              this.plugin.settings.lmstudioV1Endpoint = pCfg.defaultEndpoint;
             }
           }
-
           await this.plugin.saveSettings();
           this.display();
-        }));
+        });
+        return dd;
+      });
 
-    // ── LM Studio Native v1 API Settings (shown only for lmstudio-v1 provider) ──
-    const isV1 = this.plugin.settings.provider === "lmstudio-v1";
+    const provider = this.plugin.settings.provider;
+    const isV1 = provider === 'lmstudio-v1';
+    const isLMStudio = isV1 || provider === 'lmstudio-openai';
+
+    // ── LM Studio v1 settings ──────────────────────────────────────────────
     if (isV1) {
       const hwMode = detectHardwareMode(this.plugin.settings);
       const hwLabel = hardwareModeLabel(hwMode);
-      containerEl.createEl("div", {
-        attr: {
-          style: "background: var(--background-modifier-success-hover, rgba(0,200,100,0.1)); border: 1px solid var(--color-green, #4caf50); border-radius: 6px; padding: 0.75em 1em; margin: 0.5em 0 0.75em 0; font-size: 0.85em;"
-        }
-      }).createSpan({}).innerHTML = (
-        `🆕 LM Studio Native v1 API &nbsp;—&nbsp; Stateful conversations, SSE streaming.` +
-        `<br><strong>Detected hardware:</strong> ${hwLabel} &nbsp;|&nbsp; ` +
-        `<strong>Recommended model:</strong> <code>${getDefaultModelForHardware(hwMode)}</code>` +
-        (hwMode === "cpu"
-          ? `<br><span style="opacity:0.75;font-size:0.9em">` +
-            `Speed alt (2× faster on AMD CPU): <code>lmstudio-community/LFM2-2.6B-GGUF</code> — ` +
-            `but not ideal for knowledge-heavy tasks. ` +
-            `Balanced alt: <code>lmstudio-community/SmolLM3-3B-GGUF</code>` +
-            `</span>`
-          : ``)
-      );
+      const v1InfoEl = aiSec.createEl('div');
+      v1InfoEl.style.cssText = 'background: rgba(34,197,94,0.09); border: 1px solid rgba(34,197,94,0.3); border-radius: 6px; padding: 0.6em 0.9em; margin: 0.5em 0; font-size: 0.81em;';
+      v1InfoEl.innerHTML = `✅ <strong>LM Studio Native v1</strong> — stateful, SSE streaming.<br>Hardware: <strong>${hwLabel}</strong> · Model: <code>${getDefaultModelForHardware(hwMode)}</code>`;
 
-      new import_obsidian.Setting(containerEl)
-        .setName("LM Studio v1 Endpoint")
-        .setDesc("Base URL for LM Studio (default: http://localhost:1234). Do not add /api/v1 — the plugin handles the path.")
-        .addText(text => {
-          text.inputEl.placeholder = "http://localhost:1234";
-          text.setValue(this.plugin.settings.lmstudioV1Endpoint || "http://localhost:1234")
-            .onChange(async (value) => {
-              this.plugin.settings.lmstudioV1Endpoint = value.trim().replace(/\/+$/, "");
-              await this.plugin.saveSettings();
-            });
-        });
+      new import_obsidian.Setting(aiSec).setName('LM Studio Endpoint').setDesc('Base URL (no trailing /api/v1).')
+        .addText(t => { t.inputEl.placeholder = 'http://localhost:1234'; t.setValue(this.plugin.settings.lmstudioV1Endpoint || 'http://localhost:1234').onChange(async v => { this.plugin.settings.lmstudioV1Endpoint = v.trim().replace(/\/+$/, ''); await this.plugin.saveSettings(); }); });
 
-      new import_obsidian.Setting(containerEl)
-        .setName("LM Studio API Token")
-        .setDesc("Optional Bearer token. Set this in LM Studio → Developer → API Token if you enabled authentication.")
-        .addText(text => {
-          // 🛡️ SENTINEL: Render as password field to prevent shoulder-surfing
-          text.inputEl.type = "password";
-          text.inputEl.autocomplete = "off";
-          text.inputEl.placeholder = "(leave blank if no auth)";
-          text.setValue(this.plugin.settings.lmstudioV1ApiToken || "")
-            .onChange(async (value) => {
-              this.plugin.settings.lmstudioV1ApiToken = value;
-              await this.plugin.saveSettings();
-            });
-        });
+      new import_obsidian.Setting(aiSec).setName('API Token').setDesc('Optional Bearer token (LM Studio → Developer).')
+        .addText(t => { t.inputEl.type = 'password'; t.inputEl.autocomplete = 'off'; t.inputEl.placeholder = '(leave blank if no auth)'; t.setValue(this.plugin.settings.lmstudioV1ApiToken || '').onChange(async v => { this.plugin.settings.lmstudioV1ApiToken = v; await this.plugin.saveSettings(); }); });
 
-      new import_obsidian.Setting(containerEl)
-        .setName("Stateful Conversations")
-        .setDesc("Keep conversation context across requests using response_id. Saves tokens and enables context continuity. Disable for stateless one-shot requests (store: false).")
-        .addToggle(toggle => toggle
-          .setValue(this.plugin.settings.lmstudioV1Stateful !== false)
-          .onChange(async (value) => {
-            this.plugin.settings.lmstudioV1Stateful = value;
-            // Reset any stale thread IDs when toggling stateful mode
-            this.plugin.settings.lmstudioV1LastResponseId = null;
-            await this.plugin.saveSettings();
-          }));
+      new import_obsidian.Setting(aiSec).setName('Stateful Conversations').setDesc('Reuse response_id across calls — saves tokens on long sessions.')
+        .addToggle(t => t.setValue(this.plugin.settings.lmstudioV1Stateful !== false).onChange(async v => { this.plugin.settings.lmstudioV1Stateful = v; this.plugin.settings.lmstudioV1LastResponseId = null; await this.plugin.saveSettings(); }));
 
-      new import_obsidian.Setting(containerEl)
-        .setName("SSE Streaming")
-        .setDesc("Use Server-Sent Events streaming for faster perceived response. Collects message.delta events in real time. Disable if you encounter stream parsing issues.")
-        .addToggle(toggle => toggle
-          .setValue(this.plugin.settings.lmstudioV1StreamingEnabled !== false)
-          .onChange(async (value) => {
-            this.plugin.settings.lmstudioV1StreamingEnabled = value;
-            await this.plugin.saveSettings();
-          }));
+      new import_obsidian.Setting(aiSec).setName('SSE Streaming').setDesc('Stream tokens as they are generated. Disable if you see parsing issues.')
+        .addToggle(t => t.setValue(this.plugin.settings.lmstudioV1StreamingEnabled !== false).onChange(async v => { this.plugin.settings.lmstudioV1StreamingEnabled = v; await this.plugin.saveSettings(); }));
 
-      new import_obsidian.Setting(containerEl)
-        .setName("Reset Conversation Thread")
-        .setDesc("Clear the stored response_id to start a fresh stateful conversation on next generation.")
-        .addButton(btn => btn
-          .setButtonText("🔄 Reset Thread")
-          .onClick(async () => {
-            this.plugin.settings.lmstudioV1LastResponseId = null;
-            this.plugin.generator?._lmstudioV1?.resetThread();
-            await this.plugin.saveSettings();
-            new import_obsidian.Notice("Vault Wiki: LM Studio thread reset — next request starts fresh.", 4000);
-          }));
+      new import_obsidian.Setting(aiSec).setName('Reset Thread').setDesc('Clear the stored response_id — next call starts a fresh conversation.')
+        .addButton(btn => btn.setButtonText('↺ Reset Thread').onClick(async () => { this.plugin.settings.lmstudioV1LastResponseId = null; this.plugin.generator?._lmstudioV1?.resetThread(); await this.plugin.saveSettings(); new import_obsidian.Notice('Thread reset.', 3000); }));
     }
 
-    // ── Hardware Mode (shown for LM Studio providers) ──────────────────────────
-    const isLMStudio = this.plugin.settings.provider === "lmstudio-v1" || this.plugin.settings.provider === "lmstudio-openai";
+    // ── Hardware Optimization Mode (LM Studio only) ────────────────────────
     if (isLMStudio) {
-      containerEl.createEl("h3", { text: "Hardware Optimization Mode" });
-      containerEl.createEl("p", {
-        attr: { style: "font-size: 0.82em; color: var(--text-muted); margin: -0.25em 0 0.75em 0;" }
-      }).setText(
-        "Tunes model parameters (context length, GPU layers, batch size, threads) for your device. "
-        + "Auto-detected from your platform — override if needed."
+      const hwSec = makeSection(aiSec, '⚙️', 'Hardware Optimization', false);
+      const autoMode = detectHardwareMode({ ...this.plugin.settings, hardwareMode: 'auto' });
+      new import_obsidian.Setting(hwSec).setName('Hardware Mode')
+        .setDesc('Tunes context length and batch parameters. Auto-detects your platform.')
+        .addDropdown(dd => dd
+          .addOption('auto', `Auto-detect (currently: ${hardwareModeLabel(autoMode)})`)
+          .addOption('cpu',     '💻 CPU / Integrated GPU')
+          .addOption('gpu',     '🖥️ Discrete GPU')
+          .addOption('android', '📱 Android')
+          .addOption('ios',     '🍎 iPhone / iPad')
+          .setValue(this.plugin.settings.hardwareMode || 'auto')
+          .onChange(async v => { this.plugin.settings.hardwareMode = v; await this.plugin.saveSettings(); new import_obsidian.Notice(`Hardware mode → ${hardwareModeLabel(detectHardwareMode(this.plugin.settings))}`, 3000); }));
+      new import_obsidian.Setting(hwSec).setName('Show in Status Bar')
+        .addToggle(t => t.setValue(this.plugin.settings.showHardwareModeInStatus !== false).onChange(async v => { this.plugin.settings.showHardwareModeInStatus = v; await this.plugin.saveSettings(); }));
+    }
+
+    // ── Anthropic-specific settings ───────────────────────────────────────────
+    if (provider === 'anthropic') {
+      const anthropicInfoEl = aiSec.createEl('div');
+      anthropicInfoEl.style.cssText = 'background: rgba(234,88,12,0.08); border: 1px solid rgba(234,88,12,0.3); border-radius: 6px; padding: 0.6em 0.9em; margin: 0.5em 0; font-size: 0.81em;';
+      anthropicInfoEl.innerHTML = `🔶 <strong>Anthropic Claude</strong> — native Messages API (not OpenAI-compatible).<br>Get your key at <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a>. Keys start with <code>sk-ant-…</code>`;
+
+      new import_obsidian.Setting(aiSec).setName('Anthropic API Key')
+        .setDesc('Stored locally in data.json — never sent anywhere except api.anthropic.com over HTTPS.')
+        .addText(t => {
+          t.inputEl.type = 'password';
+          t.inputEl.autocomplete = 'off';
+          t.inputEl.placeholder = 'sk-ant-…';
+          t.setValue(this.plugin.settings.anthropicApiKey || '');
+          t.onChange(async v => {
+            // 🛡️ SENTINEL: trim silently — leading/trailing spaces in keys cause 401s
+            this.plugin.settings.anthropicApiKey = v.trim();
+            await this.plugin.saveSettings();
+          });
+        });
+    }
+
+    // ── Standard endpoint / key (non-v1, non-Anthropic providers) ────────────
+    if (!isV1 && provider !== 'anthropic') {
+      const pCfg = PROVIDER_MAP.get(provider);
+      const endpointPlaceholders = Object.fromEntries(
+        PROVIDERS.filter(p => p.defaultEndpoint).map(p => [p.id, p.defaultEndpoint])
       );
+      endpointPlaceholders.custom = 'https://your-api/v1';
 
-      const currentAutoMode = detectHardwareMode({ ...this.plugin.settings, hardwareMode: "auto" });
-      const autoLabel = `Auto (detected: ${hardwareModeLabel(currentAutoMode)})`;
-
-      new import_obsidian.Setting(containerEl)
-        .setName("Hardware Mode")
-        .setDesc(
-          "CPU: Integrated GPU / laptop — small models, no GPU layers, minimal RAM. "
-          + "GPU: Discrete GPU / desktop — large models, full GPU offload. "
-          + "Android: ARM NPU/Vulkan — Q4_0 models, low context. "
-          + "iOS: Apple Neural Engine/Metal — INT4 CoreML models, medium context."
-        )
-        .addDropdown(dropdown => dropdown
-          .addOption("auto", autoLabel)
-          .addOption("cpu", "💻 CPU / Integrated GPU (laptop)")
-          .addOption("gpu", "🖥️ Discrete GPU (desktop/workstation)")
-          .addOption("android", "📱 Android (NPU/Vulkan)")
-          .addOption("ios", "🍎 iPhone/iPad (Neural Engine/Metal)")
-          .setValue(this.plugin.settings.hardwareMode || "auto")
-          .onChange(async (value) => {
-            this.plugin.settings.hardwareMode = value;
-            await this.plugin.saveSettings();
-            const resolved = detectHardwareMode(this.plugin.settings);
-            new import_obsidian.Notice(`Vault Wiki: Hardware mode → ${hardwareModeLabel(resolved)}`, 3000);
-          }));
-
-      new import_obsidian.Setting(containerEl)
-        .setName("Show Hardware Mode in Status Bar")
-        .setDesc("Display the active hardware mode chip in the Obsidian status bar (e.g. 🖥️ GPU).")
-        .addToggle(toggle => toggle
-          .setValue(this.plugin.settings.showHardwareModeInStatus !== false)
-          .onChange(async (value) => {
-            this.plugin.settings.showHardwareModeInStatus = value;
-            await this.plugin.saveSettings();
-          }));
-    }
-
-    // ── Standard endpoint/key settings (shown for non-v1 providers) ──────────
-    if (!isV1) {
-      new import_obsidian.Setting(containerEl)
-        .setName("API Endpoint")
-        .setDesc("API endpoint URL")
-        .addText(text => {
-          const endpoints = {
-            mistral: "https://api.mistral.ai/v1",
-            openai: "https://api.openai.com/v1",
-            "lmstudio-openai": "http://localhost:1234/v1",
-            custom: "https://your-custom-endpoint.com/v1"
-          };
-          text.inputEl.placeholder = endpoints[this.plugin.settings.provider] ?? "https://api.mistral.ai/v1";
-          text.setValue(this.plugin.settings.openaiEndpoint)
-            .onChange(async (value) => {
-              this.plugin.settings.openaiEndpoint = value;
-              await this.plugin.saveSettings();
-            });
+      new import_obsidian.Setting(aiSec).setName('API Endpoint').setDesc('Full URL to the /v1 endpoint.')
+        .addText(t => {
+          t.inputEl.placeholder = endpointPlaceholders[provider] ?? '';
+          t.setValue(this.plugin.settings.openaiEndpoint);
+          t.onChange(async v => { this.plugin.settings.openaiEndpoint = v.trim(); await this.plugin.saveSettings(); });
         });
 
-      new import_obsidian.Setting(containerEl)
-        .setName("API Key")
-        .setDesc("Your API key")
-        .addText(text => {
-          // 🛡️ SENTINEL: Render as password field so the key isn't visible in plain
-          // sight (prevents shoulder-surfing and screen-share leaks).
-          text.inputEl.type = "password";
-          text.inputEl.autocomplete = "off";
-          text.setValue(this.plugin.settings.openaiApiKey)
-            .onChange(async (value) => {
-              this.plugin.settings.openaiApiKey = value;
-              await this.plugin.saveSettings();
-            });
-        });
-    }
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Model Name")
-      .setDesc("Model to use (e.g., mistral-medium-latest)")
-      .addText(text => {
-        // 🎨 PALETTE: Placeholder shows a valid example model name per-provider
-        const providerExamples = {
-          mistral: "mistral-small-latest",
-          openai: "gpt-4o-mini",
-          "lmstudio-openai": getDefaultModelForHardware(detectHardwareMode(this.plugin.settings)),
-          "lmstudio-v1": getDefaultModelForHardware(detectHardwareMode(this.plugin.settings)),
-          custom: "your-model-name",
-        };
-        text.inputEl.placeholder = providerExamples[this.plugin.settings.provider] ?? "model-name";
-        text.setValue(this.plugin.settings.modelName)
-          .onChange(async (value) => {
-            this.plugin.settings.modelName = value;
-            await this.plugin.saveSettings();
-            // Immediate feedback that the model will be used right away
-            if (value.trim()) {
-              new import_obsidian.Notice(`Vault Wiki: Model changed to "${value}" — active immediately.`, 3000);
-            }
-          });
-      });
-
-    // ── Test AI Connection ────────────────────────────────────────────────────
-    const testResultEl = containerEl.createEl("p", {
-      attr: { style: "font-size: 0.85em; margin: 0.25em 0 0.75em 1em; color: var(--text-muted);" }
-    });
-    testResultEl.setText("Click \"Test\" to verify your API key, endpoint, and model are working.");
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Test AI Connection")
-      .setDesc(`Makes a minimal test call to ${this.plugin.settings.openaiEndpoint} using model "${this.plugin.settings.modelName}". Safe — only sends "Reply with exactly: OK".`)
-      .addButton(btn => {
-        btn.setButtonText("🔌 Test Connection")
-          .setCta()
-          .onClick(async () => {
-            btn.setButtonText("Testing…");
-            btn.setDisabled(true);
-            testResultEl.setText("⏳ Calling API…");
-            testResultEl.style.color = "var(--text-muted)";
-            try {
-              const result = await this.plugin.testAIConnection();
-              testResultEl.setText(result.message);
-              testResultEl.style.color = result.success
-                ? "var(--color-green, #4caf50)"
-                : "var(--color-red, #e53935)";
-            } finally {
-              btn.setButtonText("🔌 Test Connection");
-              btn.setDisabled(false);
-            }
-          });
-      });
-
-    // v3.5.0: Find Best Mistral Model — probe models smallest-first
-    const findModelResultEl = containerEl.createEl("p", {
-      attr: { style: "font-size: 0.85em; margin: 0.25em 0 0.75em 1em; color: var(--text-muted);" }
-    });
-    findModelResultEl.setText("Scans Mistral models from smallest to largest and sets the first one that works.");
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Find Best Mistral Model")
-      .setDesc("Tries ministral-8b-latest → ministral-14b-latest → mistral-small-latest (goal) → mistral-medium-latest → mistral-large-latest (not recommended). Picks the smallest working model and applies it automatically.")
-      .addButton(btn => {
-        btn.setButtonText("🔍 Find Best Model")
-          .onClick(async () => {
-            btn.setButtonText("Scanning…");
-            btn.setDisabled(true);
-            findModelResultEl.setText("⏳ Probing models…");
-            findModelResultEl.style.color = "var(--text-muted)";
-            try {
-              const result = await this.plugin.findWorkingMistralModel();
-              findModelResultEl.setText(result.message);
-              findModelResultEl.style.color = result.success
-                ? "var(--color-green, #4caf50)"
-                : "var(--color-red, #e53935)";
-              if (result.success) {
-                // Refresh settings UI to show the newly applied model name
-                this.display();
-              }
-            } finally {
-              btn.setButtonText("🔍 Find Best Model");
-              btn.setDisabled(false);
-            }
-          });
-      });
-
-    // ── Knowledge Sources ────────────────────────────────────────────────────
-    containerEl.createEl("h2", { text: "Knowledge Sources" });
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Use Dictionary API")
-      .setDesc("Fetch definitions from dictionary")
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.useDictionaryAPI)
-        .onChange(async (value) => {
-          this.plugin.settings.useDictionaryAPI = value;
-          await this.plugin.saveSettings();
-        }));
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Use Dictionary in AI Context")
-      .setDesc("Pass dictionary definitions to AI")
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.useDictionaryInContext)
-        .onChange(async (value) => {
-          this.plugin.settings.useDictionaryInContext = value;
-          await this.plugin.saveSettings();
-        }));
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Use Wikipedia")
-      .setDesc("Fetch Wikipedia links and excerpts")
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.useWikipedia)
-        .onChange(async (value) => {
-          this.plugin.settings.useWikipedia = value;
-          await this.plugin.saveSettings();
-        }));
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Use Wikipedia in AI Context")
-      .setDesc("Pass Wikipedia content to AI")
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.useWikipediaInContext)
-        .onChange(async (value) => {
-          this.plugin.settings.useWikipediaInContext = value;
-          await this.plugin.saveSettings();
-        }));
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Glossary Base Path")
-      .setDesc("Path to custom glossary file (e.g., Definitions.md)")
-      .addText(text => {
-        text.inputEl.placeholder = "Definitions.md";
-        return text.setValue(this.plugin.settings.glossaryBasePath)
-          .onChange(async (value) => {
-            this.plugin.settings.glossaryBasePath = value;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    // ── Generation Features ──────────────────────────────────────────────────
-    containerEl.createEl("h2", { text: "Generation Features" });
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Generate Tags")
-      .setDesc("Auto-generate tags from context")
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.generateTags)
-        .onChange(async (value) => {
-          this.plugin.settings.generateTags = value;
-          await this.plugin.saveSettings();
-        }));
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Max Tags")
-      .setDesc("Maximum number of tags to generate")
-      .addSlider(slider => slider
-        .setLimits(1, 30, 1)
-        .setValue(this.plugin.settings.maxTags)
-        .setDynamicTooltip()
-        .onChange(async (value) => {
-          this.plugin.settings.maxTags = value;
-          await this.plugin.saveSettings();
-        }));
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Tags Include # Prefix")
-      .setDesc("Add # prefix to generated tags")
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.tagsIncludeHashPrefix)
-        .onChange(async (value) => {
-          this.plugin.settings.tagsIncludeHashPrefix = value;
-          await this.plugin.saveSettings();
-        }));
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Generate Related Concepts")
-      .setDesc("Auto-suggest related terms")
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.generateRelatedConcepts)
-        .onChange(async (value) => {
-          this.plugin.settings.generateRelatedConcepts = value;
-          await this.plugin.saveSettings();
-        }));
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Max Related Concepts")
-      .setDesc("Maximum number of related concepts")
-      .addSlider(slider => slider
-        .setLimits(1, 20, 1)
-        .setValue(this.plugin.settings.maxRelatedConcepts)
-        .setDynamicTooltip()
-        .onChange(async (value) => {
-          this.plugin.settings.maxRelatedConcepts = value;
-          await this.plugin.saveSettings();
-        }));
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Track Model")
-      .setDesc("Record which AI model generated each note")
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.trackModel)
-        .onChange(async (value) => {
-          this.plugin.settings.trackModel = value;
-          await this.plugin.saveSettings();
-        }));
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Use Priority Queue")
-      .setDesc("Process frequently-mentioned terms first")
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.usePriorityQueue)
-        .onChange(async (value) => {
-          this.plugin.settings.usePriorityQueue = value;
-          await this.plugin.saveSettings();
-        }));
-
-    // ── Organization ─────────────────────────────────────────────────────────
-    containerEl.createEl("h2", { text: "Organization" });
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Use Custom Directory")
-      .setDesc("Save wiki notes in specific folder")
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.useCustomDirectory)
-        .onChange(async (value) => {
-          this.plugin.settings.useCustomDirectory = value;
-          await this.plugin.saveSettings();
-        }));
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Directory Name")
-      .setDesc("Folder for wiki notes")
-      .addText(text => {
-        text.inputEl.placeholder = "Wiki";
-        return text.setValue(this.plugin.settings.customDirectoryName)
-          .onChange(async (value) => {
-            this.plugin.settings.customDirectoryName = value;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new import_obsidian.Setting(containerEl)
-      .setName("Use Categories")
-      .setDesc("Organize notes into subject-based subfolders")
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.useCategories)
-        .onChange(async (value) => {
-          this.plugin.settings.useCategories = value;
-          await this.plugin.saveSettings();
-          this.display(); // re-render to show/hide category list
-        }));
-
-    if (this.plugin.settings.useCategories) {
-      // ── Category list ────────────────────────────────────────────────────────
-      containerEl.createEl("h3", { text: "Categories" });
-      containerEl.createEl("p", {
-        text: "Each category routes notes to a subfolder. Priority order: Source Folder → Tags → Keywords → Default.",
-        cls: "setting-item-description",
-      });
-
-      const renderCategories = () => {
-        // Clear and re-render the category list area
-        catListEl.empty();
-        const cats = this.plugin.settings.categories || [];
-
-        if (cats.length === 0) {
-          catListEl.createEl("p", { text: "No categories configured.", cls: "setting-item-description" });
-        }
-
-        cats.forEach((cat, idx) => {
-          const catBox = catListEl.createDiv({ cls: "vault-wiki-category-box" });
-          catBox.style.cssText = "border:1px solid var(--background-modifier-border);border-radius:6px;padding:12px;margin-bottom:10px;";
-
-          // Row 1: Name + enabled toggle + delete
-          const row1 = catBox.createDiv({ cls: "setting-item" });
-          row1.style.cssText = "border:none;padding:0;margin-bottom:8px;";
-          const row1Info = row1.createDiv({ cls: "setting-item-info" });
-          row1Info.createEl("b", { text: `📁 ${cat.name || "(unnamed)"}` });
-          const row1Control = row1.createDiv({ cls: "setting-item-control" });
-
-          // Enabled toggle
-          const enabledLabel = row1Control.createEl("span", { text: "Enabled", cls: "setting-item-description" });
-          enabledLabel.style.marginRight = "6px";
-          const toggle = row1Control.createEl("input", { type: "checkbox" });
-          toggle.checked = cat.enabled !== false;
-          toggle.addEventListener("change", async () => {
-            this.plugin.settings.categories[idx].enabled = toggle.checked;
-            await this.plugin.saveSettings();
-          });
-
-          // Delete button
-          const delBtn = row1Control.createEl("button", { text: "✕ Remove" });
-          delBtn.style.cssText = "margin-left:10px;color:var(--text-error);";
-          delBtn.addEventListener("click", async () => {
-            this.plugin.settings.categories.splice(idx, 1);
-            if (this.plugin.settings.defaultCategory === cat.name) {
-              this.plugin.settings.defaultCategory = this.plugin.settings.categories[0]?.name || "";
-            }
-            await this.plugin.saveSettings();
-            if (this.plugin.categoryManager) this.plugin.categoryManager._buildCategoryMap();
-            renderCategories();
-          });
-
-          // Field helper
-          const addField = (label, desc, value, placeholder, onChange) => {
-            new import_obsidian.Setting(catBox)
-              .setName(label)
-              .setDesc(desc)
-              .addText(text => text
-                .setPlaceholder(placeholder)
-                .setValue(value || "")
-                .onChange(async (v) => {
-                  await onChange(v);
-                  if (this.plugin.categoryManager) this.plugin.categoryManager._buildCategoryMap();
-                })
-              );
-          };
-
-          addField("Name", "Display name for this category", cat.name, "e.g. Neuroscience",
-            async v => { this.plugin.settings.categories[idx].name = v; await this.plugin.saveSettings(); });
-
-          addField("Path", "Vault folder where notes are saved", cat.path, "e.g. Wiki/Neuroscience",
-            async v => { this.plugin.settings.categories[idx].path = v; await this.plugin.saveSettings(); });
-
-          addField("Source Folder", "Route notes whose source file lives in this folder (leave blank to skip)", cat.sourceFolder, "e.g. Neuroscience/",
-            async v => { this.plugin.settings.categories[idx].sourceFolder = v; await this.plugin.saveSettings(); });
-
-          addField("Tags (comma-separated)", "Route notes tagged with any of these (e.g. neuroscience, biology)", (cat.tags || []).join(", "), "neuroscience, biology",
-            async v => {
-              this.plugin.settings.categories[idx].tags = v.split(",").map(t => t.trim()).filter(Boolean);
-              await this.plugin.saveSettings();
-            });
-
-          addField("Keywords (comma-separated)", "Route notes whose filename or frontmatter contains any keyword (e.g. neuron, synapse, cortex)", (cat.keywords || []).join(", "), "neuron, synapse, cortex",
-            async v => {
-              this.plugin.settings.categories[idx].keywords = v.split(",").map(k => k.trim()).filter(Boolean);
-              await this.plugin.saveSettings();
-            });
-        });
-      };
-
-      const catListEl = containerEl.createDiv();
-      renderCategories();
-
-      // Add-category button
-      new import_obsidian.Setting(containerEl)
-        .addButton(btn => btn
-          .setButtonText("＋ Add Category")
-          .setCta()
-          .onClick(async () => {
-            this.plugin.settings.categories.push({
-              name: "New Category",
-              path: `Wiki/New Category`,
-              sourceFolder: "",
-              tags: [],
-              keywords: [],
-              enabled: true,
-            });
-            await this.plugin.saveSettings();
-            if (this.plugin.categoryManager) this.plugin.categoryManager._buildCategoryMap();
-            renderCategories();
-          }));
-
-      // Default category picker
-      const catNames = (this.plugin.settings.categories || []).map(c => c.name);
-      if (catNames.length > 0) {
-        new import_obsidian.Setting(containerEl)
-          .setName("Default Category")
-          .setDesc("Fallback when no source-folder, tag, or keyword matches")
-          .addDropdown(dd => {
-            for (const name of catNames) dd.addOption(name, name);
-            dd.setValue(this.plugin.settings.defaultCategory || catNames[0]);
-            dd.onChange(async v => {
-              this.plugin.settings.defaultCategory = v;
+      if (pCfg?.requiresKey) {
+        new import_obsidian.Setting(aiSec).setName('API Key').setDesc('Stored locally in data.json — never sent anywhere except your configured endpoint.')
+          .addText(t => {
+            t.inputEl.type = 'password';
+            t.inputEl.autocomplete = 'off';
+            t.setValue(this.plugin.settings.openaiApiKey);
+            t.onChange(async v => {
+              this.plugin.settings.openaiApiKey = v.trim(); // 🛡️ SENTINEL: trim silently
               await this.plugin.saveSettings();
             });
           });
       }
+    } // end !isV1 && !anthropic
+
+    // 🎨 PALETTE: Model name field + quick-pick suggestions from provider table
+    const modelSetting = new import_obsidian.Setting(aiSec)
+      .setName('Model Name')
+      .setDesc('ID of the model to use for note generation.');
+    const pCfgSuggestions = PROVIDER_MAP.get(provider);
+    if (pCfgSuggestions?.models?.length) {
+      // Add a datalist for model name suggestions
+      modelSetting.addDropdown(dd => {
+        dd.addOption('', '— type a custom model ID below —');
+        for (const m of pCfgSuggestions.models) dd.addOption(m, m);
+        dd.setValue(pCfgSuggestions.models.includes(this.plugin.settings.modelName) ? this.plugin.settings.modelName : '');
+        dd.onChange(async v => {
+          if (!v) return;
+          this.plugin.settings.modelName = v;
+          await this.plugin.saveSettings();
+          this.display();
+        });
+      });
+    }
+    modelSetting.addText(t => {
+      t.inputEl.placeholder = getDefaultModelForHardware(detectHardwareMode(this.plugin.settings));
+      t.setValue(this.plugin.settings.modelName);
+      // 🛡️ SENTINEL: validate model name — reject empty or whitespace-only
+      t.onChange(async v => {
+        const trimmed = v.trim();
+        if (!trimmed) return; // don't save empty model name
+        if (trimmed.length > 200) return; // DoS guard
+        this.plugin.settings.modelName = trimmed;
+        await this.plugin.saveSettings();
+        new import_obsidian.Notice(`Model → "${trimmed}"`, 2500);
+      });
+    });
+
+    // ── Test Connection row ────────────────────────────────────────────────
+    const testResultEl = aiSec.createEl('p');
+    testResultEl.style.cssText = 'font-size: 0.81em; color: var(--text-muted); margin: 0.2em 0;';
+    testResultEl.textContent = 'Click Test to verify your AI connection.';
+
+    const testRow = aiSec.createDiv();
+    testRow.style.cssText = 'display: flex; gap: 0.5em; flex-wrap: wrap; margin-top: 0.3em;';
+
+    // 🎨 PALETTE: Loading state on Test Connection — disables button while request in flight
+    const testBtn = testRow.createEl('button', { text: '🔌 Test Connection' });
+    testBtn.style.cssText = 'padding: 0.35em 0.8em; border-radius: 6px; cursor: pointer; border: 1px solid var(--interactive-accent); color: var(--interactive-accent); font-size: 0.84em; background: var(--background-primary);';
+    testBtn.setAttribute('aria-label', 'Test AI provider connection');
+    testBtn.addEventListener('click', async () => {
+      testBtn.textContent = '⏳ Testing…';
+      testBtn.disabled = true;
+      testResultEl.style.color = 'var(--text-muted)';
+      try {
+        const r = await this.plugin.testAIConnection();
+        testResultEl.textContent = r.message;
+        testResultEl.style.color = r.success ? 'var(--color-green, #16a34a)' : 'var(--color-red, #dc2626)';
+      } finally {
+        testBtn.textContent = '🔌 Test Connection';
+        testBtn.disabled = false;
+      }
+    });
+
+    if (provider === 'mistral' || provider === 'openai') {
+      const findBtn = testRow.createEl('button', { text: '🔍 Find Best Model' });
+      findBtn.style.cssText = 'padding: 0.35em 0.8em; border-radius: 6px; cursor: pointer; border: 1px solid var(--background-modifier-border); font-size: 0.84em; background: var(--background-primary);';
+      findBtn.setAttribute('aria-label', 'Scan for the best working Mistral model');
+      findBtn.addEventListener('click', async () => {
+        findBtn.textContent = '⏳ Scanning…';
+        findBtn.disabled = true;
+        try {
+          const r = await this.plugin.findWorkingMistralModel();
+          testResultEl.textContent = r.message;
+          testResultEl.style.color = r.success ? 'var(--color-green, #16a34a)' : 'var(--color-red, #dc2626)';
+          if (r.success) this.display();
+        } finally {
+          findBtn.textContent = '🔍 Find Best Model';
+          findBtn.disabled = false;
+        }
+      });
     }
 
-    // ── Performance ──────────────────────────────────────────────────────────
-    containerEl.createEl("h2", { text: "Performance" });
+    // ── AI Prompts — Manual + Advanced only (Auto uses computed preset) ─────
+    // 🎨 PALETTE: Prompts get their own labelled section with:
+    //   • Preset picker (Small / Balanced / Detailed / Custom)
+    //   • Live ≈ token count on each textarea
+    //   • Reset-to-preset button per field
+    // ⚡ BOLT: Smaller models (1–3B) need ultra-short prompts to avoid confusion.
+    //   The "Small" preset trims ~20 prompt tokens vs. the previous default.
+    if (mode !== 'auto') {
+    const promptSec = makeSection(aiSec, '🗣️', 'AI Prompts', false);
 
-    new import_obsidian.Setting(containerEl)
-      .setName("AI Context Max Chars")
-      .setDesc(
-        "Maximum characters of note context sent to the AI per term (after deduplication and markup stripping). "
-        + "Fewer chars = faster, cheaper, and safer for smaller models like mistral-small-latest. "
-        + "~20k chars ≈ 5k tokens. Raise for large-context models (GPT-4, mistral-large). Default: 20000."
-      )
-      .addSlider(slider => slider
-        .setLimits(2000, 60000, 1000)
-        .setValue(this.plugin.settings.aiContextMaxChars ?? 20000)
-        .setDynamicTooltip()
-        .onChange(async (value) => {
-          this.plugin.settings.aiContextMaxChars = value;
-          await this.plugin.saveSettings();
-        }));
+    // Preset selector
+    const currentPreset = detectPromptPreset(
+      this.plugin.settings.systemPrompt,
+      this.plugin.settings.userPromptTemplate
+    );
 
-    new import_obsidian.Setting(containerEl)
-      .setName("Context Depth")
-      .setDesc("How much context to extract per note. Partial (recommended) is fast and accurate. Full includes virtual mentions but is slower. Performance is fastest but only extracts the link line.")
-      .addDropdown(dropdown => dropdown
-        .addOption("full", "Full — wikilinks + virtual mentions")
-        .addOption("partial", "Partial — wikilinks only (recommended)")
-        .addOption("performance", "Performance — link line only (fastest)")
-        .setValue(this.plugin.settings.contextDepth)
-        .onChange(async (value) => {
-          this.plugin.settings.contextDepth = value;
-          await this.plugin.saveSettings();
-        }));
+    // ⚡ Token estimate helper (~1 token per 4 chars — good enough for display)
+    const estTokens = (str) => Math.round((str || '').length / 4);
 
-    new import_obsidian.Setting(containerEl)
-      .setName("Batch Size")
-      .setDesc("Number of notes to process simultaneously")
-      .addSlider(slider => slider
-        .setLimits(1, 20, 1)
-        .setValue(this.plugin.settings.batchSize)
-        .setDynamicTooltip()
-        .onChange(async (value) => {
-          this.plugin.settings.batchSize = value;
-          await this.plugin.saveSettings();
-        }));
+    const presetInfoEl = promptSec.createEl('div');
+    presetInfoEl.style.cssText = [
+      'background: var(--background-secondary); border-radius: 6px;',
+      'padding: 0.5em 0.85em; margin-bottom: 0.6em; font-size: 0.81em;',
+    ].join(' ');
 
-    new import_obsidian.Setting(containerEl)
-      .setName("Show Progress Notification")
-      .setDesc("Display progress during generation")
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.showProgressNotification)
-        .onChange(async (value) => {
-          this.plugin.settings.showProgressNotification = value;
-          await this.plugin.saveSettings();
-        }));
+    const renderPresetInfo = (key) => {
+      const p = PROMPT_PRESETS[key];
+      presetInfoEl.innerHTML = p
+        ? `<strong>${p.label}</strong> — ${p.desc}`
+        : '✏️ <strong>Custom</strong> — manually edited prompts.';
+    };
+    renderPresetInfo(currentPreset);
 
-    // ── Logging ──────────────────────────────────────────────────────────────
-    containerEl.createEl("h2", { text: "Logging & Diagnostics" });
+    // Preset dropdown row
+    const presetRow = promptSec.createDiv();
+    presetRow.style.cssText = 'display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap; margin-bottom: 0.75em;';
+    presetRow.createEl('label', { text: 'Preset:' }).style.cssText = 'font-size: 0.85em; font-weight: 600;';
 
-    new import_obsidian.Setting(containerEl)
-      .setName("Enable Logging")
-      .setDesc("Write session logs to your vault")
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.enableLogging)
-        .onChange(async (value) => {
-          this.plugin.settings.enableLogging = value;
-          await this.plugin.saveSettings();
-        }));
+    const presetSelect = presetRow.createEl('select');
+    presetSelect.style.cssText = 'padding: 0.25em 0.5em; border-radius: 5px; font-size: 0.85em; border: 1px solid var(--background-modifier-border); background: var(--background-primary); cursor: pointer;';
+    presetSelect.setAttribute('aria-label', 'Select a prompt preset');
 
-    new import_obsidian.Setting(containerEl)
-      .setName("Log Level")
-      .setDesc("Minimum severity to record (DEBUG logs everything; ERROR logs only failures)")
-      .addDropdown(dropdown => dropdown
-        .addOption("DEBUG", "DEBUG — verbose")
-        .addOption("INFO", "INFO — normal")
-        .addOption("WARN", "WARN — problems only")
-        .addOption("ERROR", "ERROR — failures only")
-        .setValue(this.plugin.settings.logLevel)
-        .onChange(async (value) => {
-          this.plugin.settings.logLevel = value;
-          await this.plugin.saveSettings();
-        }));
+    [['small', '🟢 Small (1–3B)'], ['balanced', '🟡 Balanced (7B)'], ['detailed', '🔵 Detailed (13B+)'], ['custom', '✏️ Custom']].forEach(([val, lbl]) => {
+      const opt = presetSelect.createEl('option', { text: lbl, value: val });
+      if (val === currentPreset) opt.selected = true;
+    });
 
-    new import_obsidian.Setting(containerEl)
-      .setName("Log Directory")
-      .setDesc("Vault path for log files (default: VaultWiki/Logs)")
-      .addText(text => {
-        text.inputEl.placeholder = "VaultWiki/Logs";
-        return text.setValue(this.plugin.settings.logDirectory)
-          .onChange(async (value) => {
-            this.plugin.settings.logDirectory = value;
-            await this.plugin.saveSettings();
-          });
+    const applyPresetBtn = presetRow.createEl('button', { text: 'Apply' });
+    applyPresetBtn.style.cssText = 'padding: 0.25em 0.7em; border-radius: 5px; font-size: 0.82em; cursor: pointer; background: var(--interactive-accent); color: var(--text-on-accent); border: none;';
+    applyPresetBtn.setAttribute('aria-label', 'Apply selected preset to prompts');
+
+    // Textarea refs (populated below, used in apply handler)
+    let sysTextarea = null;
+    let userTextarea = null;
+
+    applyPresetBtn.addEventListener('click', async () => {
+      const key = presetSelect.value;
+      const preset = PROMPT_PRESETS[key];
+      if (!preset) return;
+      this.plugin.settings.systemPrompt = preset.system;
+      this.plugin.settings.userPromptTemplate = preset.user;
+      await this.plugin.saveSettings();
+      if (sysTextarea)  { sysTextarea.value = preset.system;  sysTokenEl.textContent  = `≈ ${estTokens(preset.system)} tokens`; }
+      if (userTextarea) { userTextarea.value = preset.user;   userTokenEl.textContent = `≈ ${estTokens(preset.user)} tokens`; }
+      renderPresetInfo(key);
+      new import_obsidian.Notice(`Prompts set to ${preset.label}`, 2500);
+    });
+
+    // Update info on dropdown change (before Apply)
+    presetSelect.addEventListener('change', () => renderPresetInfo(presetSelect.value));
+
+    // ── System prompt field ───────────────────────────────────────────────
+    const sysWrap = promptSec.createDiv();
+    sysWrap.style.cssText = 'margin-bottom: 0.75em;';
+    const sysHeaderRow = sysWrap.createDiv();
+    sysHeaderRow.style.cssText = 'display: flex; align-items: center; gap: 0.5em; margin-bottom: 0.3em;';
+    sysHeaderRow.createEl('span', { text: 'System Prompt' }).style.cssText = 'font-weight: 600; font-size: 0.9em;';
+    const sysTokenEl = sysHeaderRow.createEl('span', { text: `≈ ${estTokens(this.plugin.settings.systemPrompt)} tokens` });
+    sysTokenEl.style.cssText = 'font-size: 0.75em; color: var(--text-muted); margin-left: auto; font-family: var(--font-monospace);';
+
+    const sysArea = sysWrap.createEl('textarea');
+    sysArea.value = this.plugin.settings.systemPrompt;
+    sysArea.rows = 3;
+    sysArea.style.cssText = 'width: 100%; font-size: 0.83em; resize: vertical; border-radius: 4px; padding: 0.4em; border: 1px solid var(--background-modifier-border); background: var(--background-primary); color: var(--text-normal); font-family: var(--font-monospace);';
+    sysArea.setAttribute('aria-label', 'System prompt for wiki note generation');
+    sysArea.setAttribute('placeholder', 'Write a clear wiki summary. Bold key terms with **asterisks**.');
+    sysTextarea = sysArea;
+    sysArea.addEventListener('input', async () => {
+      this.plugin.settings.systemPrompt = sysArea.value;
+      sysTokenEl.textContent = `≈ ${estTokens(sysArea.value)} tokens`;
+      // Mark preset as custom when manually edited
+      presetSelect.value = 'custom';
+      renderPresetInfo('custom');
+      await this.plugin.saveSettings();
+    });
+
+    const sysResetBtn = sysWrap.createEl('button', { text: '↺ Reset to preset' });
+    sysResetBtn.style.cssText = 'margin-top: 0.25em; font-size: 0.75em; padding: 0.15em 0.5em; border-radius: 4px; cursor: pointer; border: 1px solid var(--background-modifier-border); background: transparent; color: var(--text-muted);';
+    sysResetBtn.setAttribute('aria-label', 'Reset system prompt to selected preset value');
+    sysResetBtn.addEventListener('click', async () => {
+      const preset = PROMPT_PRESETS[presetSelect.value];
+      if (!preset) return;
+      this.plugin.settings.systemPrompt = preset.system;
+      sysArea.value = preset.system;
+      sysTokenEl.textContent = `≈ ${estTokens(preset.system)} tokens`;
+      await this.plugin.saveSettings();
+    });
+
+    // ── User prompt template field ────────────────────────────────────────
+    const userWrap = promptSec.createDiv();
+    userWrap.style.cssText = 'margin-bottom: 0.5em;';
+    const userHeaderRow = userWrap.createDiv();
+    userHeaderRow.style.cssText = 'display: flex; align-items: center; gap: 0.5em; margin-bottom: 0.3em;';
+    userHeaderRow.createEl('span', { text: 'User Prompt Template' }).style.cssText = 'font-weight: 600; font-size: 0.9em;';
+    const userTokenEl = userHeaderRow.createEl('span', { text: `≈ ${estTokens(this.plugin.settings.userPromptTemplate)} tokens` });
+    userTokenEl.style.cssText = 'font-size: 0.75em; color: var(--text-muted); margin-left: auto; font-family: var(--font-monospace);';
+    userWrap.createEl('p', { text: 'Use {{term}} and {{context}} as placeholders. {{context}} is replaced with the compressed vault context.' }).style.cssText = 'font-size: 0.78em; color: var(--text-muted); margin: 0 0 0.3em;';
+
+    const userArea = userWrap.createEl('textarea');
+    userArea.value = this.plugin.settings.userPromptTemplate;
+    userArea.rows = 4;
+    userArea.style.cssText = sysArea.style.cssText;
+    userArea.setAttribute('aria-label', 'User prompt template for wiki note generation');
+    userArea.setAttribute('placeholder', 'Summarize "{{term}}" based on the context below.\n\n{{context}}');
+    userTextarea = userArea;
+    userArea.addEventListener('input', async () => {
+      this.plugin.settings.userPromptTemplate = userArea.value;
+      userTokenEl.textContent = `≈ ${estTokens(userArea.value)} tokens`;
+      presetSelect.value = 'custom';
+      renderPresetInfo('custom');
+      await this.plugin.saveSettings();
+    });
+
+    const userResetBtn = userWrap.createEl('button', { text: '↺ Reset to preset' });
+    userResetBtn.style.cssText = sysResetBtn.style.cssText;
+    userResetBtn.setAttribute('aria-label', 'Reset user prompt template to selected preset value');
+    userResetBtn.addEventListener('click', async () => {
+      const preset = PROMPT_PRESETS[presetSelect.value];
+      if (!preset) return;
+      this.plugin.settings.userPromptTemplate = preset.user;
+      userArea.value = preset.user;
+      userTokenEl.textContent = `≈ ${estTokens(preset.user)} tokens`;
+      await this.plugin.saveSettings();
+    });
+
+    } // end if(mode !== 'auto') for AI Prompts
+
+    // ── 📁 Organization section ────────────────────────────────────────────
+    const orgSec = makeSection(containerEl, '📁', 'Organization', true);
+
+    new import_obsidian.Setting(orgSec).setName('Wiki Directory').setDesc('Vault folder where all wiki notes are saved.')
+      .addText(t => { t.inputEl.placeholder = 'Wiki'; t.setValue(this.plugin.settings.customDirectoryName).onChange(async v => { this.plugin.settings.customDirectoryName = v; await this.plugin.saveSettings(); }); });
+
+    new import_obsidian.Setting(orgSec).setName('Use Categories').setDesc('Organise notes into subject subfolders based on tags, keywords, or source path.')
+      .addToggle(toggle => toggle.setValue(this.plugin.settings.useCategories).onChange(async (value) => { this.plugin.settings.useCategories = value; await this.plugin.saveSettings(); this.display(); }));
+
+    if (this.plugin.settings.useCategories) {
+      // ── Category list ────────────────────────────────────────────────────
+      orgSec.createEl('p', {
+        text: 'Priority order: Source Folder → Tags → Keywords → Default.',
+        cls: 'setting-item-description',
       });
 
-    new import_obsidian.Setting(containerEl)
-      .setName("Max Log Age (days)")
-      .setDesc("Log files older than this are automatically deleted")
-      .addSlider(slider => slider
-        .setLimits(1, 90, 1)
-        .setValue(this.plugin.settings.maxLogAgeDays)
-        .setDynamicTooltip()
-        .onChange(async (value) => {
-          this.plugin.settings.maxLogAgeDays = value;
+      const catListEl = orgSec.createDiv();
+      const renderCategoryList = () => {
+        catListEl.empty();
+        const cats = this.plugin.settings.categories || [];
+        if (cats.length === 0) {
+          catListEl.createEl('p', { text: 'No categories yet. Add one below.', cls: 'setting-item-description' });
+        }
+        cats.forEach((cat, idx) => {
+          const box = catListEl.createDiv();
+          box.style.cssText = 'border: 1px solid var(--background-modifier-border); border-radius: 6px; padding: 10px 12px; margin-bottom: 8px;';
+          const hdrRow = box.createDiv();
+          hdrRow.style.cssText = 'display: flex; align-items: center; gap: 0.5em; margin-bottom: 0.5em;';
+          hdrRow.createEl('strong', { text: cat.name || '(unnamed)' });
+
+          const enabledLbl = hdrRow.createEl('label');
+          enabledLbl.style.cssText = 'display: flex; align-items: center; gap: 0.3em; font-size: 0.82em; color: var(--text-muted); margin-left: auto; cursor: pointer;';
+          const enabledChk = enabledLbl.createEl('input');
+          enabledChk.type = 'checkbox'; enabledChk.checked = cat.enabled !== false;
+          enabledChk.setAttribute('aria-label', `Enable ${cat.name} category`);
+          enabledLbl.append('Enabled');
+          enabledChk.addEventListener('change', async () => { this.plugin.settings.categories[idx].enabled = enabledChk.checked; await this.plugin.saveSettings(); });
+
+          const delBtn = hdrRow.createEl('button', { text: '✕' });
+          delBtn.style.cssText = 'padding: 0.1em 0.45em; border-radius: 4px; cursor: pointer; color: var(--color-red, #dc2626); border: 1px solid currentColor; font-size: 0.75em; background: transparent;';
+          delBtn.setAttribute('aria-label', `Remove ${cat.name} category`);
+          delBtn.addEventListener('click', async () => {
+            this.plugin.settings.categories.splice(idx, 1);
+            if (this.plugin.settings.defaultCategory === cat.name)
+              this.plugin.settings.defaultCategory = this.plugin.settings.categories[0]?.name || '';
+            await this.plugin.saveSettings();
+            this.plugin.categoryManager?._buildCategoryMap();
+            renderCategoryList();
+          });
+
+          const addField = (label, desc, val, ph, saveFn) => new import_obsidian.Setting(box).setName(label).setDesc(desc)
+            .addText(t => t.setPlaceholder(ph).setValue(val || '').onChange(async v => { await saveFn(v); this.plugin.categoryManager?._buildCategoryMap(); }));
+
+          addField('Name', '', cat.name, 'e.g. Neuroscience', async v => { this.plugin.settings.categories[idx].name = v; await this.plugin.saveSettings(); });
+          addField('Path', 'Vault folder for notes in this category', cat.path, 'e.g. Wiki/Neuroscience', async v => { this.plugin.settings.categories[idx].path = v; await this.plugin.saveSettings(); });
+          addField('Source Folder', 'Route notes from this folder to this category', cat.sourceFolder, 'e.g. Notes/Neuro/', async v => { this.plugin.settings.categories[idx].sourceFolder = v; await this.plugin.saveSettings(); });
+          addField('Tags', 'Comma-separated tags that trigger this category', (cat.tags || []).join(', '), 'e.g. neuroscience, biology', async v => { this.plugin.settings.categories[idx].tags = v.split(',').map(s => s.trim()).filter(Boolean); await this.plugin.saveSettings(); });
+          addField('Keywords', 'Comma-separated keywords matched against filenames', (cat.keywords || []).join(', '), 'e.g. neuron, synapse', async v => { this.plugin.settings.categories[idx].keywords = v.split(',').map(s => s.trim()).filter(Boolean); await this.plugin.saveSettings(); });
+        });
+      };
+      renderCategoryList();
+
+      new import_obsidian.Setting(orgSec).addButton(btn => btn.setButtonText('＋ Add Category').setCta().onClick(async () => {
+        this.plugin.settings.categories.push({ name: 'New Category', path: 'Wiki/New Category', sourceFolder: '', tags: [], keywords: [], enabled: true });
+        await this.plugin.saveSettings(); this.plugin.categoryManager?._buildCategoryMap(); renderCategoryList();
+      }));
+
+      const catNames = (this.plugin.settings.categories || []).map(c => c.name);
+      if (catNames.length > 0) {
+        new import_obsidian.Setting(orgSec).setName('Default Category').setDesc('Fallback when no rule matches.')
+          .addDropdown(dd => { catNames.forEach(n => dd.addOption(n, n)); dd.setValue(this.plugin.settings.defaultCategory || catNames[0]).onChange(async v => { this.plugin.settings.defaultCategory = v; await this.plugin.saveSettings(); }); });
+      }
+    }
+
+    // ── 📂 AI Subcategories — Manual + Advanced only ───────────────────────
+    if (mode !== 'auto') {
+    const subcatSec = makeSection(containerEl, '📂', 'AI Subcategories', false);
+
+    const subcatInfo = subcatSec.createEl('div');
+    subcatInfo.style.cssText = 'background: rgba(99,102,241,0.08); border-left: 3px solid var(--interactive-accent); border-radius: 4px; padding: 0.5em 0.85em; margin-bottom: 0.6em; font-size: 0.8em; color: var(--text-muted);';
+    subcatInfo.innerHTML = '<strong>How it works:</strong> Within each main category the AI creates subject subfolders automatically. '
+      + 'E.g. <code>Wiki/Anatomy/Electrophysiology/Action Potential.md</code>. '
+      + 'One small API call per unique term — session-cached. The classifier reuses existing folder names to keep related terms grouped.';
+
+    new import_obsidian.Setting(subcatSec).setName('Enable AI Subcategories')
+      .setDesc('Requires a working AI provider and "Use Categories" enabled above.')
+      .addToggle(t => t.setValue(this.plugin.settings.aiSubcategoriesEnabled ?? false).onChange(async v => { this.plugin.settings.aiSubcategoriesEnabled = v; await this.plugin.saveSettings(); this.display(); }));
+
+    if (this.plugin.settings.aiSubcategoriesEnabled) {
+      const g2 = this.plugin.generator;
+      if (g2?._subcatByCategory?.size > 0) {
+        const summaryEl = subcatSec.createEl('div');
+        summaryEl.style.cssText = 'background: var(--background-secondary); border-radius: 5px; padding: 0.5em 0.8em; font-size: 0.8em; margin-bottom: 0.5em;';
+        const lines = [];
+        for (const [cat, subcats] of g2._subcatByCategory) lines.push(`<strong>${cat}:</strong> ${Array.from(subcats).join(', ')}`);
+        summaryEl.innerHTML = '📂 <strong>Session subcategories:</strong><br>' + lines.join('<br>');
+      }
+
+      new import_obsidian.Setting(subcatSec).setName('Context Characters').setDesc('Characters of note context sent to the classifier. 600 is plenty — more wastes tokens.')
+        .addSlider(s => s.setLimits(100, 2000, 100).setValue(this.plugin.settings.aiSubcategoryContextChars ?? 600).setDynamicTooltip().onChange(async v => { this.plugin.settings.aiSubcategoryContextChars = v; await this.plugin.saveSettings(); }));
+
+      // ── Classifier prompt with preset shortcuts ─────────────────────────
+      const subcatPromptWrap = subcatSec.createDiv();
+      subcatPromptWrap.style.cssText = 'margin: 0.25em 0 0.75em;';
+
+      const subcatHdrRow = subcatPromptWrap.createDiv();
+      subcatHdrRow.style.cssText = 'display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap; margin-bottom: 0.3em;';
+      subcatHdrRow.createEl('span', { text: 'Classifier System Prompt' }).style.cssText = 'font-weight: 600; font-size: 0.88em;';
+      const subcatTokenEl = subcatHdrRow.createEl('span');
+      const curSubcatPrompt = this.plugin.settings.aiSubcategorySystemPrompt || PROMPT_PRESETS.balanced.subcatSystem;
+      subcatTokenEl.textContent = `≈ ${Math.round(curSubcatPrompt.length / 4)} tokens`;
+      subcatTokenEl.style.cssText = 'font-size: 0.75em; color: var(--text-muted); margin-left: auto; font-family: var(--font-monospace);';
+
+      subcatPromptWrap.createEl('p', { text: 'Keep terse — the model only outputs a 2–4 word folder name. Shorter = faster + cheaper.' }).style.cssText = 'font-size: 0.78em; color: var(--text-muted); margin: 0 0 0.3em;';
+
+      // Quick-set buttons for each preset's subcategory prompt
+      const subcatPresetRow = subcatPromptWrap.createDiv();
+      subcatPresetRow.style.cssText = 'display: flex; gap: 0.35em; flex-wrap: wrap; margin-bottom: 0.4em;';
+      subcatPresetRow.createEl('span', { text: 'Set to:' }).style.cssText = 'font-size: 0.78em; color: var(--text-muted); align-self: center;';
+
+      let subcatArea = null;
+      Object.entries(PROMPT_PRESETS).forEach(([key, preset]) => {
+        const btn = subcatPresetRow.createEl('button', { text: preset.label.replace(/^[^ ]+ /, '') });
+        btn.style.cssText = 'padding: 0.18em 0.55em; border-radius: 4px; font-size: 0.76em; cursor: pointer; border: 1px solid var(--background-modifier-border); background: var(--background-primary);';
+        btn.setAttribute('aria-label', `Set classifier prompt to ${key} preset`);
+        btn.addEventListener('click', async () => {
+          this.plugin.settings.aiSubcategorySystemPrompt = preset.subcatSystem;
+          if (subcatArea) {
+            subcatArea.value = preset.subcatSystem;
+            subcatTokenEl.textContent = `≈ ${Math.round(preset.subcatSystem.length / 4)} tokens`;
+          }
           await this.plugin.saveSettings();
+          new import_obsidian.Notice(`Classifier prompt → ${key}`, 2000);
+        });
+      });
+
+      const subcatAreaEl = subcatPromptWrap.createEl('textarea');
+      subcatAreaEl.value = curSubcatPrompt;
+      subcatAreaEl.rows = 2;
+      subcatAreaEl.style.cssText = 'width: 100%; font-size: 0.82em; resize: vertical; border-radius: 4px; padding: 0.4em; border: 1px solid var(--background-modifier-border); background: var(--background-primary); color: var(--text-normal); font-family: var(--font-monospace);';
+      subcatAreaEl.setAttribute('aria-label', 'Classifier system prompt for AI subcategory naming');
+      subcatArea = subcatAreaEl;
+      subcatAreaEl.addEventListener('input', async () => {
+        this.plugin.settings.aiSubcategorySystemPrompt = subcatAreaEl.value;
+        subcatTokenEl.textContent = `≈ ${Math.round(subcatAreaEl.value.length / 4)} tokens`;
+        await this.plugin.saveSettings();
+      });
+
+      new import_obsidian.Setting(subcatSec).setName('Clear Subcategory Cache').setDesc('Forces reclassification of all terms on the next run.')
+        .addButton(btn => btn.setButtonText('🗑 Clear Cache').setWarning().onClick(() => {
+          if (this.plugin.generator) { this.plugin.generator._subcatCache.clear(); this.plugin.generator._subcatByCategory.clear(); }
+          new import_obsidian.Notice('Subcategory cache cleared.', 4000);
+          this.display();
         }));
+    }
 
-    new import_obsidian.Setting(containerEl)
-      .setName("Open Latest Log")
-      .setDesc("View the most recent session log in the editor")
-      .addButton(btn => btn
-        .setButtonText("Open Log")
-        .onClick(() => this.plugin.openLatestLog()));
+    } // end if(mode !== 'auto') for AI Subcategories
 
-    // ── Term Matching ────────────────────────────────────────────────────────
-    containerEl.createEl("h2", { text: "Term Matching" });
+    // ── 📚 Knowledge Sources — Manual + Advanced only ────────────────────────
+    if (mode !== 'auto') {
+    const ksSec = makeSection(containerEl, '📚', 'Knowledge Sources', false);
 
-    new import_obsidian.Setting(containerEl)
-      .setName("Min Word Length")
-      .setDesc("Minimum characters for term matching")
-      .addSlider(slider => slider
-        .setLimits(2, 10, 1)
-        .setValue(this.plugin.settings.minWordLengthForAutoDetect)
-        .setDynamicTooltip()
-        .onChange(async (value) => {
-          this.plugin.settings.minWordLengthForAutoDetect = value;
-          await this.plugin.saveSettings();
-        }));
+    new import_obsidian.Setting(ksSec).setName('Wikipedia Excerpts').setDesc('Fetch a Wikipedia summary for each term and include it in the note.')
+      .addToggle(t => t.setValue(this.plugin.settings.useWikipedia).onChange(async v => { this.plugin.settings.useWikipedia = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(ksSec).setName('Wikipedia in AI Context').setDesc('Pass the Wikipedia excerpt to the AI when generating the summary.')
+      .addToggle(t => t.setValue(this.plugin.settings.useWikipediaInContext).onChange(async v => { this.plugin.settings.useWikipediaInContext = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(ksSec).setName('Dictionary API').setDesc('Fetch free definitions from dictionaryapi.dev.')
+      .addToggle(t => t.setValue(this.plugin.settings.useDictionaryAPI).onChange(async v => { this.plugin.settings.useDictionaryAPI = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(ksSec).setName('Dictionary in AI Context').setDesc('Pass dictionary definitions to the AI when generating the summary.')
+      .addToggle(t => t.setValue(this.plugin.settings.useDictionaryInContext).onChange(async v => { this.plugin.settings.useDictionaryInContext = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(ksSec).setName('Glossary File').setDesc('Path to a custom glossary note (optional).')
+      .addText(t => { t.inputEl.placeholder = 'Definitions.md'; t.setValue(this.plugin.settings.glossaryBasePath).onChange(async v => { this.plugin.settings.glossaryBasePath = v; await this.plugin.saveSettings(); }); });
 
-    new import_obsidian.Setting(containerEl)
-      .setName("Max Words to Match")
-      .setDesc("Check 1-word, 2-word, or 3-word combinations")
-      .addSlider(slider => slider
-        .setLimits(1, 5, 1)
-        .setValue(this.plugin.settings.maxWordsToMatch)
-        .setDynamicTooltip()
-        .onChange(async (value) => {
-          this.plugin.settings.maxWordsToMatch = value;
-          await this.plugin.saveSettings();
-        }));
+    } // end if(mode !== 'auto') for Knowledge Sources
 
-    new import_obsidian.Setting(containerEl)
-      .setName("Prefer Longer Matches")
-      .setDesc("Prioritize multi-word matches (e.g., 'Smooth Muscle' over 'Smooth')")
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.preferLongerMatches)
-        .onChange(async (value) => {
-          this.plugin.settings.preferLongerMatches = value;
-          await this.plugin.saveSettings();
-        }));
+    // ── ✍️ Generation Features — Manual + Advanced only ──────────────────────
+    if (mode !== 'auto') {
+    const featSec = makeSection(containerEl, '✍️', 'Generation Features', false);
 
-    new import_obsidian.Setting(containerEl)
-      .setName("Match Whole Words Only")
-      .setDesc("Prevent partial matches (recommended)")
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.matchWholeWordsOnly)
-        .onChange(async (value) => {
-          this.plugin.settings.matchWholeWordsOnly = value;
-          await this.plugin.saveSettings();
-        }));
+    new import_obsidian.Setting(featSec).setName('Generate Tags').setDesc('Auto-populate frontmatter tags from source file tags.')
+      .addToggle(t => t.setValue(this.plugin.settings.generateTags).onChange(async v => { this.plugin.settings.generateTags = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(featSec).setName('Max Tags')
+      .addSlider(s => s.setLimits(1, 30, 1).setValue(this.plugin.settings.maxTags).setDynamicTooltip().onChange(async v => { this.plugin.settings.maxTags = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(featSec).setName('Tags Include # Prefix')
+      .addToggle(t => t.setValue(this.plugin.settings.tagsIncludeHashPrefix).onChange(async v => { this.plugin.settings.tagsIncludeHashPrefix = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(featSec).setName('Related Concepts').setDesc('Suggest related wikilinked terms at the bottom of each note.')
+      .addToggle(t => t.setValue(this.plugin.settings.generateRelatedConcepts).onChange(async v => { this.plugin.settings.generateRelatedConcepts = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(featSec).setName('Max Related Concepts')
+      .addSlider(s => s.setLimits(1, 20, 1).setValue(this.plugin.settings.maxRelatedConcepts).setDynamicTooltip().onChange(async v => { this.plugin.settings.maxRelatedConcepts = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(featSec).setName('Track AI Model').setDesc('Record which model generated each note in its frontmatter.')
+      .addToggle(t => t.setValue(this.plugin.settings.trackModel).onChange(async v => { this.plugin.settings.trackModel = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(featSec).setName('AI Summary Disclaimer').setDesc('Appended below every AI summary.')
+      .addText(t => t.setValue(this.plugin.settings.aiSummaryDisclaimer).onChange(async v => { this.plugin.settings.aiSummaryDisclaimer = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(featSec).setName('Extract Key Concepts').setDesc('Pull key concepts from existing summaries to surface related ideas.')
+      .addToggle(t => t.setValue(this.plugin.settings.extractKeyConceptsFromSummary ?? true).onChange(async v => { this.plugin.settings.extractKeyConceptsFromSummary = v; await this.plugin.saveSettings(); }));
+
+    } // end if(mode !== 'auto') for Generation Features
+
+    // ── ⚡ Performance — Advanced only ────────────────────────────────────────
+    if (mode === 'advanced') {
+    const perfSec = makeSection(containerEl, '⚡', 'Performance', false);
+
+    new import_obsidian.Setting(perfSec).setName('AI Context Max Chars')
+      .setDesc('Hard cap on characters sent to the AI per term (after markup stripping). ~20k ≈ 5k tokens. Lower for small/fast local models.')
+      .addSlider(s => s.setLimits(2000, 60000, 1000).setValue(this.plugin.settings.aiContextMaxChars ?? 20000).setDynamicTooltip().onChange(async v => { this.plugin.settings.aiContextMaxChars = v; await this.plugin.saveSettings(); }));
+
+    new import_obsidian.Setting(perfSec).setName('Context Depth')
+      .setDesc('Partial (recommended): wikilinks only. Full: wikilinks + virtual mentions. Performance: link line only.')
+      .addDropdown(dd => dd
+        .addOption('partial', 'Partial — wikilinks only (recommended)')
+        .addOption('full', 'Full — wikilinks + virtual mentions')
+        .addOption('performance', 'Performance — link line only (fastest)')
+        .setValue(this.plugin.settings.contextDepth)
+        .onChange(async v => { this.plugin.settings.contextDepth = v; await this.plugin.saveSettings(); }));
+
+    new import_obsidian.Setting(perfSec).setName('Batch Size').setDesc('Notes generated in parallel. Higher = faster; lower = less API pressure.')
+      .addSlider(s => s.setLimits(1, 20, 1).setValue(this.plugin.settings.batchSize).setDynamicTooltip().onChange(async v => { this.plugin.settings.batchSize = v; await this.plugin.saveSettings(); }));
+
+    new import_obsidian.Setting(perfSec).setName('Priority Queue').setDesc('Process most-linked terms first.')
+      .addToggle(t => t.setValue(this.plugin.settings.usePriorityQueue).onChange(async v => { this.plugin.settings.usePriorityQueue = v; await this.plugin.saveSettings(); }));
+
+    new import_obsidian.Setting(perfSec).setName('Show Progress Notification').setDesc('Live progress bar in the Obsidian notification strip.')
+      .addToggle(t => t.setValue(this.plugin.settings.showProgressNotification).onChange(async v => { this.plugin.settings.showProgressNotification = v; await this.plugin.saveSettings(); }));
+
+    } // end if(mode === 'advanced') for Performance
+
+    // ── 🔍 Term Matching — Advanced only ─────────────────────────────────────
+    if (mode === 'advanced') {
+    const matchSec = makeSection(containerEl, '🔍', 'Term Matching', false);
+
+    new import_obsidian.Setting(matchSec).setName('Min Word Length').setDesc('Terms shorter than this are skipped.')
+      .addSlider(s => s.setLimits(2, 10, 1).setValue(this.plugin.settings.minWordLengthForAutoDetect).setDynamicTooltip().onChange(async v => { this.plugin.settings.minWordLengthForAutoDetect = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(matchSec).setName('Max Words to Match').setDesc('Maximum consecutive words to consider as one term.')
+      .addSlider(s => s.setLimits(1, 5, 1).setValue(this.plugin.settings.maxWordsToMatch).setDynamicTooltip().onChange(async v => { this.plugin.settings.maxWordsToMatch = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(matchSec).setName('Prefer Longer Matches').setDesc('Prefer "Smooth Muscle" over "Smooth" when both match.')
+      .addToggle(t => t.setValue(this.plugin.settings.preferLongerMatches).onChange(async v => { this.plugin.settings.preferLongerMatches = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(matchSec).setName('Whole Words Only').setDesc('Prevent matching inside longer words (recommended).')
+      .addToggle(t => t.setValue(this.plugin.settings.matchWholeWordsOnly).onChange(async v => { this.plugin.settings.matchWholeWordsOnly = v; await this.plugin.saveSettings(); }));
+
+    } // end if(mode === 'advanced') for Term Matching
+
+    // ── 📋 Logging — Advanced only ────────────────────────────────────────────
+    if (mode === 'advanced') {
+    const logSec = makeSection(containerEl, '📋', 'Logging & Diagnostics', false);
+
+    new import_obsidian.Setting(logSec).setName('Enable Logging').setDesc('Write structured session logs to your vault.')
+      .addToggle(t => t.setValue(this.plugin.settings.enableLogging).onChange(async v => { this.plugin.settings.enableLogging = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(logSec).setName('Log Level').setDesc('DEBUG = everything · INFO = normal · WARN = problems · ERROR = failures')
+      .addDropdown(dd => dd.addOption('DEBUG','DEBUG').addOption('INFO','INFO (default)').addOption('WARN','WARN').addOption('ERROR','ERROR')
+        .setValue(this.plugin.settings.logLevel).onChange(async v => { this.plugin.settings.logLevel = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(logSec).setName('Log Directory')
+      .addText(t => { t.inputEl.placeholder = 'VaultWiki/Logs'; t.setValue(this.plugin.settings.logDirectory).onChange(async v => { this.plugin.settings.logDirectory = v; await this.plugin.saveSettings(); }); });
+    new import_obsidian.Setting(logSec).setName('Max Log Age (days)')
+      .addSlider(s => s.setLimits(1, 90, 1).setValue(this.plugin.settings.maxLogAgeDays).setDynamicTooltip().onChange(async v => { this.plugin.settings.maxLogAgeDays = v; await this.plugin.saveSettings(); }));
+    new import_obsidian.Setting(logSec).setName('Open Latest Log').setDesc('View the most recent session log in the editor.')
+      .addButton(btn => btn.setButtonText('📄 Open Log').onClick(() => this.plugin.openLatestLog()));
+    } // end if(mode === 'advanced') for Logging
   }
+
 };
+

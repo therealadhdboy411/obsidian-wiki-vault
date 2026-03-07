@@ -1,9 +1,9 @@
 {
   "id": "vault-wiki",
   "name": "Vault Wiki",
-  "version": "3.7.0",
+  "version": "1.0.0",
   "minAppVersion": "0.15.0",
-  "description": "AI-powered wiki generation with smart multi-word matching, category organisation, Virtual Linker integration, and comprehensive context injection. Full LM Studio REST API v1 support with hardware-aware model defaults. By adhdboy411 & Claude.",
+  "description": "AI-powered wiki generation with smart multi-word matching, category organisation, and comprehensive context injection. Supports Anthropic Claude, OpenAI, Mistral, Groq, Ollama, OpenRouter, Together AI, and LM Studio. Public Beta — by adhdboy411 & Claude.",
   "author": "adhdboy411 & Claude",
   "authorUrl": "https://github.com/adhdboy411",
   "isDesktopOnly": false

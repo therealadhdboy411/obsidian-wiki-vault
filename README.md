@@ -1,173 +1,215 @@
-# WikiVault Unified
+# Vault Wiki — Obsidian Plugin
 
-> Complete knowledge management system: AI-powered wiki generation for Obsidian with link-based indexing, context depth modes, pause/resume control, structured session logging, and Virtual Linker integration.
+> **Public Beta v1.0.0** — AI-powered wiki generation for Obsidian  
+> By [adhdboy411](https://github.com/adhdboy411) & Claude
 
-[![CI](https://github.com/your-username/wikivault-unified/actions/workflows/ci.yml/badge.svg)](https://github.com/your-username/wikivault-unified/actions/workflows/ci.yml)
-![Obsidian](https://img.shields.io/badge/Obsidian-%3E%3D0.15.0-blueviolet)
-![License](https://img.shields.io/badge/license-Apache--2.0-blue)
-![Version](https://img.shields.io/badge/version-3.7.0-green)
-
----
-
-## Note: This code is 100% AI generated, unless noted below. Use at your own risk.
-
-This app was predominantly generated using Claude 3.5 Sonnet and 3.7 Sonnet (for all features in the `main.js` and all text in the `manifest.json`) and Gemini 2.0 Flash (via Jules for documentation updates.)
-Feel free to contribute! I can't code myself, so I rely on AI to do it for me... I'm a medical student and don't really have the time to learn; I just want to enhance my Obsidian notebook, and any human help would be greatly appreciated! If I could code, I'd do it myself, but alas, here we are.
-Contact me at owencs411@gmail.com if you are curious about contributing, or find any security issues! If there are any building issues, I apologize in advance; I'm on the free Claude plan and I can only do so much.
-
-## What It Does
-
-WikiVault Unified scans your Obsidian vault for unresolved wikilinks and automatically generates structured wiki notes for each term. Each note is enriched with:
-
-- **AI-generated summary** (Mistral, OpenAI, or any OpenAI-compatible endpoint)
-- **Wikipedia excerpt** with a link to the full article
-- **Dictionary definition** from the free Dictionary API
-- **Mentions** — every place the term appears in your notes, with surrounding context
-- **Auto-generated tags** pulled from your existing note metadata
-- **Related concepts** extracted from wikilinks in context
-- **Copilot-friendly frontmatter** (`type: wiki-note`, `copilot-index: true`, `source-notes`) for Obsidian Copilot integration
+Vault Wiki automatically generates rich, linked wiki notes for every `[[wikilink]]` in your vault. Point it at any AI provider, run it once, and watch your unresolved links turn into full wiki notes with AI summaries, Wikipedia excerpts, dictionary definitions, and source mentions — all cross-linked and tagged.
 
 ---
 
 ## Features
 
-| Feature                    | Description                                                                         |
-| -------------------------- | ----------------------------------------------------------------------------------- |
-| 🤖 AI Summaries            | Supports Mistral, OpenAI, LM Studio, and any OpenAI-compatible API                  |
-| 🚀 LM Studio Native v1     | Stateful conversations, SSE streaming, and response_id continuity                   |
-| 💻 Hardware Optimization   | Automatic tuning for CPU, GPU, Android, and iOS hardware                            |
-| ⚡ Link-Based Indexing     | Only indexes terms with inbound wikilinks — ~85% smaller index than full-vault scan |
-| 🎚️ Context Depth Modes     | **Partial** (default), **Full**, or **Performance** — choose speed vs. thoroughness |
-| ⏸️ Pause / Resume / Cancel | Control generation mid-run without losing progress                                  |
-| 🛡️ Write Safety            | Strict guards prevent any writes outside the wiki/log directories                   |
-| 📊 Performance Diagnostics | Full performance report in logs: throughput, cache hit rates, timing per phase      |
-| 📂 Categories              | Auto-assigns notes to subject folders based on source file path, tags, or keywords  |
-| 📝 Structured Logs         | Session logs with error indexes, performance stats, and diagnostic reports          |
-| ⚡ Priority Queue          | Processes most-referenced terms first                                               |
-| 🔄 Auto-Update Pass        | Regenerates notes when source files change or summaries are missing                 |
-| 🔤 Synonyms                | Configurable abbreviation expansion (e.g. ATP → Adenosine Triphosphate)             |
-| 🧠 API Response Caching    | In-memory caches for Wikipedia and Dictionary — eliminates duplicate fetches        |
-| ⏱️ HH:MM:SS ETA            | Progress notification updates with estimated time remaining                         |
-| 🔗 Virtual Linker          | Integration for rendering virtual links to generated wiki notes                     |
+- **Multi-provider AI** — Anthropic Claude, OpenAI, Mistral, Groq, Ollama, OpenRouter, Together AI, LM Studio (OpenAI-compat & native v1)
+- **Smart matching** — finds multi-word terms, handles plurals, synonyms, and abbreviations
+- **Category system** — auto-assigns notes to subject folders (Anatomy, Biochemistry, General, etc.)
+- **AI subcategories** — optional second-level folder classification via AI
+- **Wikipedia + Dictionary** — enriches every note with real definitions and encyclopedia excerpts
+- **Virtual linker** — renders `[[wikilinks]]` as styled links even before the target note exists
+- **Hardware-aware** — auto-detects CPU/GPU/mobile and tunes LM Studio accordingly
+- **Progress bar** — live ETA notice during generation
+- **Pause/Resume/Cancel** — full control over long generation runs
+- **Structured logging** — session logs written to your vault for debugging
 
 ---
 
-## Performance
+## Supported Providers
 
-WikiVault Unified is designed to never freeze your Obsidian workspace:
-
-- **Deferred startup** — Index builds after layout is ready, not during plugin load
-- **UI yielding** — All loops (`buildIndex`, file pre-reading, context scanning, batches) yield to the event loop every 50–100 iterations so you can switch tabs, edit files, and navigate freely during indexing
-- **File content caching** — All vault files are read once into memory (via `cachedRead`), reducing I/O from O(terms × files) to O(files)
-- **Debounced file-switch** — The `runOnFileSwitch` setting uses a 5-second debounce to prevent generation spam during rapid navigation
-
-### Context Depth Modes
-
-| Mode                  | What it does                                                 | Speed                 |
-| --------------------- | ------------------------------------------------------------ | --------------------- |
-| **Partial** (default) | Detects `[[wikilinks]]` only, extracts surrounding paragraph | ~3× faster than Full  |
-| **Full**              | Detects wikilinks + virtual/fuzzy mentions via term matching | Most thorough         |
-| **Performance**       | Detects `[[wikilinks]]` only, extracts just the link line    | ~10× faster than Full |
+| Provider | Type | Notes |
+|---|---|---|
+| 🌊 Mistral AI | Cloud | `mistral-small-latest` default |
+| 🤖 OpenAI | Cloud | `gpt-4o-mini` default |
+| 🔶 Anthropic Claude | Cloud | Native `/v1/messages` API; `claude-3-5-haiku` default |
+| ⚡ Groq | Cloud | Ultra-fast inference; `llama-3.1-8b-instant` default |
+| 🦙 Ollama | Local | OpenAI-compat on `localhost:11434`; `llama3.2` default |
+| 🌐 OpenRouter | Cloud | Access 200+ models via one key |
+| 🤝 Together AI | Cloud | `Meta-Llama-3.1-8B-Instruct-Turbo` default |
+| 🏠 LM Studio (OpenAI) | Local | OpenAI-compat mode on `localhost:1234` |
+| 🏠 LM Studio (Native v1) | Local | Stateful + SSE streaming; hardware-optimized ✨ |
+| ⚙️ Custom endpoint | Any | Any OpenAI-compatible API |
 
 ---
 
 ## Installation
 
-### Option A — BRAT (recommended for early access)
+### Option A — Simple install (recommended for users)
 
-1. Install [BRAT](https://github.com/TfTHacker/obsidian42-brat) from the Obsidian Community Plugins browser
-2. Run **BRAT: Add a beta plugin** → paste `your-username/wikivault-unified`
+1. In Obsidian, open **Settings → Community Plugins → Browse**
+2. Search for **Vault Wiki**
+3. Click **Install**, then **Enable**
 
-### Option B — Manual
+If the plugin is not yet in the community registry, use **Option B**.
 
-1. Go to [Releases](https://github.com/your-username/wikivault-unified/releases/latest)
-2. Download `wikivault-unified-x.y.z.zip`
-3. Unzip into `.obsidian/plugins/wikivault-unified/` inside your vault
-4. Enable in **Settings → Community Plugins**
+### Option B — Manual install
+
+1. Download the latest release from [GitHub Releases](https://github.com/adhdboy411/vault-wiki/releases)
+2. Unzip into your vault's plugin folder:  
+   `<vault>/.obsidian/plugins/vault-wiki/`
+3. The folder must contain exactly:
+   - `main.js`
+   - `manifest.json`
+4. Reload Obsidian (`Ctrl/Cmd+R`) and enable the plugin under **Settings → Community Plugins**
+
+### Option C — Build from source
+
+> **Important:** The released `main.js` is the *single compiled output*. Building from source produces an identical file — no extra steps needed.
+
+```bash
+# Prerequisites: Node.js 18+ and npm
+git clone https://github.com/adhdboy411/vault-wiki.git
+cd vault-wiki
+npm install
+npm run build
+```
+
+Copy `main.js` and `manifest.json` into your vault plugin folder (see Option B above).  
+The build output is deterministic — you get exactly the same `main.js` as the release.
+
+---
+
+## Quick Start
+
+1. **Add some wikilinks** to your notes — e.g. `[[Action Potential]]`, `[[Sarcomere]]`, `[[Photosynthesis]]`
+2. Open **Settings → Vault Wiki → AI Provider** and pick your provider
+3. Add your API key (for cloud providers)
+4. Click **Generate Wiki Notes** (ribbon icon 📖 or `Ctrl+P → Vault Wiki: Generate`)
+5. Wiki notes appear in your `Wiki/` folder
 
 ---
 
 ## Configuration
 
-On first run, the plugin will use sensible defaults. To configure:
+### Settings Modes
 
-1. Open **Settings → WikiVault Unified**
-2. Set your **AI Provider** and paste your **API Key** (stored locally, never sent anywhere except your chosen AI endpoint)
-3. Set **Context Depth** under Performance to control speed vs. thoroughness
-4. Configure **Categories** to match your vault's folder structure
-5. Optionally add **Synonyms** for domain-specific abbreviations
+| Mode | Description |
+|---|---|
+| **Auto** | Smart defaults — only pick a provider; everything else computed from hardware |
+| **Manual** | All main settings visible (default for existing installs) |
+| **Advanced** | Everything, including logging, term matching internals, raw sliders |
 
-> **Your API key is stored in `data.json` inside the plugin folder. This file is gitignored and should never be committed.**
+### Wiki Directory
 
-### Supported AI Providers
+By default, notes are written to `Wiki/` in your vault root. Change this under **Settings → Vault Wiki → Wiki Directory**.
 
-| Provider              | Endpoint                    | Notes                                      |
-| --------------------- | --------------------------- | ------------------------------------------ |
-| Mistral AI            | `https://api.mistral.ai/v1` | Recommended for Cloud                      |
-| OpenAI                | `https://api.openai.com/v1` | GPT-4o, etc.                               |
-| LM Studio (Native v1) | `http://localhost:1234`     | Recommended for Local (stateful/streaming) |
-| LM Studio (OpenAI)    | `http://localhost:1234/v1`  | Legacy local support                       |
-| Any OpenAI-compatible | Custom URL                  | Set `apiType: openai`                      |
+> **Note:** The wiki folder is automatically excluded as a *source* of new terms — Vault Wiki will never read its own output as input. This prevents feedback loops.
 
----
+### Categories
 
-## Usage
+Define subject categories (e.g. Anatomy, Biochemistry, General) with paths, source folder hints, and tags. Vault Wiki auto-assigns each term to the best-matching category based on path, filename, and frontmatter signals.
 
-### Generate Wiki Notes
+### Synonyms / Abbreviations
 
-Click the **book icon** in the left ribbon, or run the command:
-
-> **WikiVault: Generate missing Wiki notes**
-
-### Commands
-
-| Command                     | Description                                    |
-| --------------------------- | ---------------------------------------------- |
-| Generate missing Wiki notes | Scan for unresolved links and generate notes   |
-| Refresh term cache          | Force-rebuild the term index                   |
-| **Pause wiki generation**   | Pause the current generation run               |
-| **Resume wiki generation**  | Resume a paused generation run                 |
-| **Cancel wiki generation**  | Cancel generation entirely                     |
-| Open latest log             | Open the most recent session log in the editor |
-| Flush log to vault now      | Write buffered log entries immediately         |
-
-### Reading Logs
-
-Logs are written to `WikiVault/Logs/session-YYYY-MM-DD_HH-MM-SS.md`.
-Each log contains:
-
-- A **session summary table** (notes generated/failed/skipped, API calls, cache hits, runtime)
-- A **📊 performance diagnostic report** (throughput, context depth, cache hit rate, content size)
-- An **error quick-reference** at the top
-- A **full chronological log** with JSON context for every event
+Map short forms to full terms (e.g. `ACh → Acetylcholine`). Synonyms expand during matching, Wikipedia lookups, and dictionary lookups.
 
 ---
 
-## Safety & Security
+## Provider Setup
 
-WikiVault Unified includes strict safety mechanisms to protect your vault:
+### Anthropic Claude
 
-- **Write-safety guard** — All write operations pass through `assertSafeWritePath()`, which blocks any writes outside the wiki/log directories. Your personal notes are never modified.
-- **Path traversal protection** — Terms are sanitized via `sanitizeTermForPath()` to strip `..` and unsafe characters before being used in file paths.
-- **SSRF protection** — User-configurable API endpoints are validated to block `localhost` and private IP ranges.
-- **Credential safety** — The API key input is masked (`type="password"`) and stored locally in `data.json` (gitignored).
+1. Get your key at [console.anthropic.com](https://console.anthropic.com)
+2. Keys start with `sk-ant-…`
+3. Select **🔶 Anthropic Claude** in Settings → Provider
+4. Paste your key in **Anthropic API Key**
+5. Recommended model: `claude-3-5-haiku-20241022` (fast + affordable)
+
+### Groq
+
+1. Get your key at [console.groq.com](https://console.groq.com)
+2. Select **⚡ Groq** in Settings → Provider
+3. Recommended model: `llama-3.1-8b-instant` (extremely fast, free tier available)
+
+### Ollama (local, no key needed)
+
+1. Install [Ollama](https://ollama.ai) and run `ollama pull llama3.2`
+2. Select **🦙 Ollama** — endpoint auto-fills to `http://localhost:11434/v1`
+3. No API key required
+
+### LM Studio (Native v1, recommended for local)
+
+1. Install [LM Studio](https://lmstudio.ai), load a model, enable the Local Server
+2. Select **🏠 LM Studio — Native v1 ✨**
+3. Hardware mode is auto-detected (CPU/GPU/Android/iOS)
+
+### OpenRouter
+
+1. Get your key at [openrouter.ai/keys](https://openrouter.ai/keys)
+2. Select **🌐 OpenRouter** — many free models available
+3. Recommended free model: `meta-llama/llama-3.1-8b-instruct:free`
 
 ---
 
-## Development
+## Commands
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full developer guide.
-
-```bash
-git clone https://github.com/your-username/wikivault-unified
-cd wikivault-unified
-npm install
-cp data.json.example data.json   # then add your API key
-npm run dev                       # watch-build
-```
+| Command | Description |
+|---|---|
+| `Vault Wiki: Generate missing wiki notes` | Main command — runs full generation pass |
+| `Vault Wiki: Refresh term cache` | Rebuild the term index manually |
+| `Vault Wiki: Pause wiki generation` | Pause an in-progress run |
+| `Vault Wiki: Resume wiki generation` | Resume after pause |
+| `Vault Wiki: Cancel wiki generation` | Stop current run entirely |
+| `Vault Wiki: Open latest log file` | View the most recent session log |
+| `Vault Wiki: Flush log to vault now` | Force-write buffered log entries |
 
 ---
 
-## License
+## Security
 
-[Apache 2.0](LICENSE) — © therealadhdboy411
+- **API keys** are stored locally in `.obsidian/plugins/vault-wiki/data.json` — they are never sent anywhere except the configured AI endpoint
+- **Path traversal protection** — term names are sanitized before use as file paths; `..` sequences and unsafe characters are stripped
+- **Write-safety guard** — Vault Wiki will only write to the wiki directory and log directory; any attempt to write outside is blocked
+- **HTTPS enforcement** — cloud providers warn loudly if configured with an HTTP endpoint (your API key would be sent unencrypted)
+- **SSRF protection** — endpoint URLs are validated against protocol and hostname rules before any network request
+
+---
+
+## Troubleshooting
+
+**"No unresolved links found"**  
+Create some `[[wikilinks]]` in your notes first. Vault Wiki only generates notes for terms that are actively linked from your notes.
+
+**AI returns empty / null**  
+- Check your API key is correct (Settings → AI Provider → Test Connection)
+- Verify the model name is valid for your provider
+- For LM Studio: ensure a model is loaded in the server
+
+**Wiki notes not appearing in the right category**  
+- Check your category `sourceFolder` setting — it should match the folder where your source notes live
+- Add relevant `tags` to the category definition
+
+**Performance is slow**  
+- Switch to Settings → Performance → Batch Size (increase for cloud APIs)
+- Use Context Depth: `partial` or `performance` instead of `full`
+- Use a smaller/faster model (Groq's free tier is excellent for this)
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for full history.
+
+### v1.0.0 — Public Beta
+- 🚀 No longer a dev/early beta — ready for general use
+- ✅ Added providers: Anthropic Claude, Groq, Ollama, OpenRouter, Together AI
+- 🛡️ Security hardening: HTTPS enforcement, key trimming, model name validation, SSRF improvements
+- ⚡ Performance: AbortController on streaming, per-term cancel checks, provider config table
+- 🎨 UX: per-provider model suggestions, cleaner provider cards, better empty states
+
+---
+
+## Contributing
+
+Issues and PRs welcome at [github.com/adhdboy411/vault-wiki](https://github.com/adhdboy411/vault-wiki).
+
+---
+
+*Vault Wiki is a community plugin and is not affiliated with Obsidian, Anthropic, OpenAI, or any other AI provider.*
