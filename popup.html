@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src https://api.mistral.ai; style-src 'self' 'unsafe-inline'; media-src blob:;">
+  <title>WhatsApp PTT</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 290px;
+      background: #111b21;
+      color: #e9edef;
+      font-family: -apple-system, 'Segoe UI', sans-serif;
+      font-size: 13px;
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 18px 16px 14px;
+      border-bottom: 1px solid #1f2c33;
+    }
+    .icon {
+      width: 34px; height: 34px;
+      background: #00a884;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .icon svg {
+      width: 17px; height: 17px;
+      stroke: #111b21; fill: none;
+      stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+    }
+    h1 { font-size: 14px; font-weight: 700; color: #e9edef; letter-spacing: 0.2px; }
+    h1 span { display: block; font-size: 11px; font-weight: 400; color: #8696a0; margin-top: 2px; }
+
+    /* ── Tabs ── */
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid #1f2c33;
+    }
+    .tab {
+      flex: 1;
+      padding: 9px 0;
+      text-align: center;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+      color: #8696a0;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tab.active {
+      color: #00a884;
+      border-bottom-color: #00a884;
+    }
+
+    /* ── Panel ── */
+    .panel { display: none; padding: 16px; }
+    .panel.active { display: block; }
+
+    /* ── Form controls ── */
+    label {
+      display: block;
+      font-size: 11px; font-weight: 600;
+      letter-spacing: 0.6px; text-transform: uppercase;
+      color: #8696a0; margin-bottom: 5px;
+    }
+    input[type="password"],
+    input[type="text"] {
+      width: 100%;
+      background: #1f2c33;
+      border: 1px solid #2a3942;
+      border-radius: 8px;
+      padding: 8px 10px;
+      color: #e9edef;
+      font-size: 12px;
+      font-family: 'Courier New', monospace;
+      outline: none;
+      transition: border-color 0.15s;
+      letter-spacing: 0.4px;
+    }
+    input:focus { border-color: #00a884; }
+
+    input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 4px;
+      background: #2a3942;
+      border-radius: 2px;
+      outline: none;
+      cursor: pointer;
+      margin: 6px 0;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      background: #00a884;
+      cursor: pointer;
+    }
+
+    /* ── Toggle ── */
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .toggle-label {
+      font-size: 12px;
+      color: #e9edef;
+      line-height: 1.4;
+    }
+    .toggle-label small { display: block; color: #8696a0; font-size: 11px; }
+    .toggle {
+      position: relative;
+      width: 36px; height: 20px;
+      flex-shrink: 0;
+    }
+    .toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
+    .toggle-track {
+      position: absolute; inset: 0;
+      background: #2a3942;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .toggle-track::after {
+      content: '';
+      position: absolute;
+      left: 3px; top: 3px;
+      width: 14px; height: 14px;
+      background: #8696a0;
+      border-radius: 50%;
+      transition: transform 0.2s, background 0.2s;
+    }
+    .toggle input:checked + .toggle-track { background: #005c4b; }
+    .toggle input:checked + .toggle-track::after {
+      transform: translateX(16px);
+      background: #00a884;
+    }
+
+    /* ── Buttons ── */
+    .row { display: flex; gap: 6px; margin-top: 8px; }
+    button {
+      flex: 1;
+      background: #00a884; color: #111b21;
+      border: none; border-radius: 8px;
+      padding: 8px 10px; font-size: 12px; font-weight: 700;
+      cursor: pointer; transition: background 0.15s, opacity 0.15s;
+      white-space: nowrap;
+    }
+    button:hover { background: #02b897; }
+    button:disabled { opacity: 0.45; cursor: default; }
+    button.secondary {
+      background: #1f2c33; color: #8696a0;
+      border: 1px solid #2a3942;
+    }
+    button.secondary:hover { background: #2a3942; color: #e9edef; }
+    button.danger {
+      background: #1f2c33; color: #e74c3c;
+      border: 1px solid #2a3942;
+    }
+    button.danger:hover { background: #2a3942; }
+
+    /* ── Feedback ── */
+    .feedback {
+      font-size: 11px; text-align: center;
+      margin-top: 8px; min-height: 14px; color: #00a884;
+    }
+    .feedback.error { color: #e74c3c; }
+    .feedback.warn  { color: #e67e22; }
+
+    /* ── Spacer ── */
+    .mt8  { margin-top: 8px;  }
+    .mt12 { margin-top: 12px; }
+    .mt14 { margin-top: 14px; }
+    .mb6  { margin-bottom: 6px; }
+
+    /* ── Voice select dropdown ── */
+    select {
+      width: 100%;
+      background: #1f2c33;
+      border: 1px solid #2a3942;
+      border-radius: 8px;
+      padding: 8px 10px;
+      color: #e9edef;
+      font-size: 12px;
+      outline: none;
+      cursor: pointer;
+      transition: border-color 0.15s;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238696a0'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+      padding-right: 28px;
+    }
+    select:focus { border-color: #00a884; }
+    select option { background: #1f2c33; }
+
+    /* ── Record indicator ── */
+    .rec-indicator {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #c0392b;
+      margin-right: 5px;
+      animation: rec-blink 1s ease-in-out infinite;
+    }
+    @keyframes rec-blink {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.2; }
+    }
+
+    /* ── Hint footer ── */
+    .hint {
+      font-size: 10.5px;
+      color: #4a5568;
+      line-height: 1.75;
+      padding: 12px 16px 14px;
+      border-top: 1px solid #1f2c33;
+    }
+    .hint strong { color: #8696a0; }
+    .key {
+      display: inline-block;
+      background: #1f2c33; border: 1px solid #2a3942;
+      border-radius: 3px; padding: 0 4px;
+      font-family: 'Courier New', monospace;
+      font-size: 10px; color: #e9edef;
+    }
+    .hint a { color: #00a884; text-decoration: none; }
+    .hint a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="icon">
+      <svg viewBox="0 0 24 24">
+        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+        <line x1="12" y1="19" x2="12" y2="23"/>
+        <line x1="8"  y1="23" x2="16" y2="23"/>
+      </svg>
+    </div>
+    <h1>
+      WhatsApp PTT
+      <span>Voxtral STT + TTS · v1.2</span>
+    </h1>
+  </header>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <div class="tab active" data-tab="dictate">🎤 Dictate</div>
+    <div class="tab"        data-tab="voice"  >🔊 Read-Aloud</div>
+  </div>
+
+  <!-- ── Panel: Dictate (API key) ── -->
+  <div class="panel active" id="panel-dictate">
+    <label for="apikey">Mistral API Key</label>
+    <input type="password" id="apikey" placeholder="sk-…" autocomplete="off" spellcheck="false">
+
+    <div class="row">
+      <button id="save-key">Save</button>
+      <button class="secondary" id="toggle-key">Show</button>
+    </div>
+    <div class="row mt8" style="margin-top:0">
+      <button class="secondary" id="test-key">Test Key</button>
+    </div>
+
+    <div class="mt12"></div>
+    <label for="stt-quality">Transcription Quality</label>
+    <select id="stt-quality" style="margin-top:2px;">
+      <option value="fast" selected>Fast (voxtral-mini)</option>
+      <option value="accurate">Accurate (mistral-large + reasoning)</option>
+    </select>
+    
+    <div class="mt14"></div>
+    <div class="toggle-row" style="margin-bottom:8px">
+      <div class="toggle-label">
+        Phone Mode (Hands-free)
+        <small>Starts when you speak, sends when you stop</small>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="phone-mode">
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+
+    <!-- VAD Tuning Sliders -->
+    <div id="vad-tuning" style="margin-top:10px">
+      <label>VAD Threshold <span id="vad-thresh-label" style="color:#e9edef;font-weight:400;text-transform:none;font-size:12px">8</span></label>
+      <input type="range" id="vad-threshold" min="1" max="50" value="8">
+      
+      <div class="mt8"></div>
+      <label>Silence Before Send <span id="vad-silence-label" style="color:#e9edef;font-weight:400;text-transform:none;font-size:12px">1500ms</span></label>
+      <input type="range" id="vad-silence" min="500" max="5000" step="100" value="1500">
+    </div>
+
+    <div class="feedback" id="fb-key"></div>
+  </div>
+
+  <!-- ── Panel: Voice / TTS ── -->
+  <div class="panel" id="panel-voice">
+
+    <!-- Auto-read toggle -->
+    <div class="toggle-row">
+      <div class="toggle-label">
+        Auto-read incoming messages
+        <small>Plays each new message as it arrives</small>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="auto-read">
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+
+    <!-- Volume -->
+    <label>Volume <span id="vol-label" style="color:#e9edef;font-weight:400;text-transform:none;font-size:12px">100%</span></label>
+    <input type="range" id="volume" min="0" max="100" value="100">
+
+    <div class="mt14"></div>
+
+    <!-- Voice source: saved ID -->
+    <label>Official voice ID <span style="text-transform:none;font-weight:400;font-size:10px;color:#4a5568">(from Mistral Studio)</span></label>
+    <div style="display:flex;gap:6px;align-items:stretch">
+      <input type="text" id="voice-id" placeholder="e.g. your-voice-uuid" style="flex:1">
+      <button class="secondary" id="fetch-voices" style="flex:0;padding:8px 10px;white-space:nowrap">List</button>
+    </div>
+    <select id="voice-list" style="margin-top:6px;display:none">
+      <option value="">— select a voice —</option>
+    </select>
+    <div id="voice-conflict-warn" class="feedback warn" style="display:none;margin-top:6px">⚠ Clear voice ID to use reference clip</div>
+
+    <div class="mt12"></div>
+
+    <!-- Voice source: reference clip -->
+    <label>Or use a reference clip <span style="text-transform:none;font-weight:400;font-size:10px;color:#4a5568">(record or upload)</span></label>
+    <div class="row" style="margin-top:0">
+      <button class="secondary" id="rec-ref" style="flex:1">Record (5s)</button>
+      <button class="secondary" id="upload-ref" style="flex:1">Upload</button>
+      <button class="danger"    id="clear-ref" style="flex:0;padding:8px 10px">Clear</button>
+    </div>
+    <input type="file" id="file-ref" accept="audio/*" style="display:none">
+    <div id="rec-status" class="feedback"></div>
+
+    <div class="row mt8" style="margin-top:6px">
+      <button id="save-voice">Save voice settings</button>
+    </div>
+    <div class="row" style="margin-top:0">
+      <button class="secondary" id="test-tts">Test TTS</button>
+    </div>
+    <div class="feedback" id="fb-voice"></div>
+  </div>
+
+  <!-- Keyboard hint footer (always visible) -->
+  <div class="hint">
+    <strong>Dictate:</strong>
+    Hold <span class="key">Right Ctrl</span> → speak → release to send.<br>
+    Global: <span class="key">Ctrl+Shift+Space</span> start · <span class="key">Ctrl+Shift+.</span> stop<br>
+    <br>
+    <strong>Read-aloud:</strong>
+    Click 🔊 or <span class="key">Ctrl+Shift+L</span> · right-click 🔊 to toggle auto-read.<br>
+    Hover any incoming bubble to read it individually.<br>
+    <br>
+    <a href="#" id="shortcutsLink">Customise shortcuts</a> ·
+    <a href="https://console.mistral.ai/voices" target="_blank">Mistral voices</a>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

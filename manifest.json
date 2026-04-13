@@ -1,10 +1,51 @@
 {
-  "id": "vault-wiki",
-  "name": "Vault Wiki",
-  "version": "1.0.0",
-  "minAppVersion": "0.15.0",
-  "description": "AI-powered wiki generation with smart multi-word matching, category organisation, and comprehensive context injection. Supports Anthropic Claude, OpenAI, Mistral, Groq, Ollama, OpenRouter, Together AI, and LM Studio. Public Beta — by adhdboy411 & Claude.",
-  "author": "adhdboy411 & Claude",
-  "authorUrl": "https://github.com/adhdboy411",
-  "isDesktopOnly": false
+  "manifest_version": 3,
+  "name": "WhatsApp PTT",
+  "version": "1.2",
+  "description": "Push-to-talk + read-aloud for WhatsApp Web. Dictate with Voxtral STT, listen with Voxtral TTS.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://web.whatsapp.com/*",
+    "https://api.mistral.ai/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "commands": {
+    "ptt-start": {
+      "suggested_key": {
+        "windows": "Ctrl+Shift+Space",
+        "default":  "Ctrl+Shift+Space"
+      },
+      "description": "Start PTT recording",
+      "global": true
+    },
+    "ptt-stop": {
+      "suggested_key": {
+        "windows": "Ctrl+Shift+Period",
+        "default":  "Ctrl+Shift+Period"
+      },
+      "description": "Stop PTT and send",
+      "global": true
+    },
+    "ptt-listen": {
+      "suggested_key": {
+        "windows": "Ctrl+Shift+L",
+        "default":  "Ctrl+Shift+L"
+      },
+      "description": "Read last message aloud (or stop playback)",
+      "global": true
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "WhatsApp PTT Settings"
+  }
 }
